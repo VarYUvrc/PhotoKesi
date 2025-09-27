@@ -18,9 +18,9 @@ final class PhotoLibraryViewModel: ObservableObject {
     private let fetchOptions: PHFetchOptions
 
     init(thumbnailCache: PhotoThumbnailCache = .shared,
-         fetchOptions: PHFetchOptions = PhotoLibraryViewModel.defaultFetchOptions()) {
+         fetchOptions: PHFetchOptions? = nil) {
         self.thumbnailCache = thumbnailCache
-        self.fetchOptions = fetchOptions
+        self.fetchOptions = fetchOptions ?? PhotoLibraryViewModel.defaultFetchOptions()
     }
 
     func loadThumbnails(limit: Int = 60,
