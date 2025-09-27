@@ -181,7 +181,6 @@ private extension ContentView {
                 Spacer()
             }
             .padding(24)
-            .navigationTitle("PhotoKesi")
             .alert("ダミーアクション", isPresented: $isBucketAlertPresented) {
                 Button("OK", role: .cancel) { }
             } message: {
@@ -192,6 +191,7 @@ private extension ContentView {
                     viewModel.clearBucketAfterDeletion()
                 }
             }
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 }
