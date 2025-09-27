@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Photos
 import UIKit
@@ -62,7 +63,7 @@ final class PhotoLibraryViewModel: ObservableObject {
         thumbnails = []
     }
 
-    private static func defaultFetchOptions() -> PHFetchOptions {
+    nonisolated private static func defaultFetchOptions() -> PHFetchOptions {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.includeHiddenAssets = false

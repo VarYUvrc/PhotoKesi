@@ -30,6 +30,10 @@
 - 改善: PhotoLibraryViewModel の初期化時に発生する MainActor エラーを解消する
     - [x] defaultFetchOptions のデフォルト評価を MainActor 内に移動する
 
+- 改善: PhotoLibraryViewModel の Combine 依存とフェッチオプション初期化を整理する
+    - [x] Combine を明示的に import してビルドエラーを防ぐ
+    - [x] defaultFetchOptions 呼び出しによる MainActor 分離エラーを解消する
+
 * [ ] A3: 撮影時刻が近い写真を簡易に束ねる（まずは ±1 時間固定）。
 * [ ] A4: 同一束の中で、知覚ハッシュと差分ハッシュの距離を計算し、最初の **類似グループを 1 つ** 作る。
 * [ ] A5: ベスト1枚を単純指標で選ぶ（ブレの少なさのみ等、まずは一指標から）。
