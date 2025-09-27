@@ -6,28 +6,87 @@
 //
 
 import SwiftUI
+import Combine
 
 struct DummyPhotoCard: Identifiable {
-    let id = UUID()
+    let id: UUID
     let title: String
     let symbolName: String
     let baseColor: Color
     var isChecked: Bool
+    var isInBucket: Bool
+
+    init(id: UUID = UUID(), title: String, symbolName: String, baseColor: Color, isChecked: Bool, isInBucket: Bool = false) {
+        self.id = id
+        self.title = title
+        self.symbolName = symbolName
+        self.baseColor = baseColor
+        self.isChecked = isChecked
+        self.isInBucket = isInBucket
+    }
 }
 
-struct ContentView: View {
-    @State private var photoCards: [DummyPhotoCard] = [
+struct BucketActionResult {
+    let totalItems: Int
+    let newlyAdded: Int
+}
+
+final class DummyGroupViewModel: ObservableObject {
+    @Published private(set) var photoCards: [DummyPhotoCard]
+
+    init(photoCards: [DummyPhotoCard] = [
         DummyPhotoCard(title: "ベストショット", symbolName: "star.fill", baseColor: .orange, isChecked: true),
         DummyPhotoCard(title: "類似候補A", symbolName: "photo.fill", baseColor: .teal, isChecked: false),
         DummyPhotoCard(title: "類似候補B", symbolName: "camera.macro", baseColor: .purple, isChecked: false)
-    ]
+    ]) {
+        self.photoCards = photoCards
+    }
+
+    var bucketItems: [DummyPhotoCard] {
+        photoCards.filter { $0.isInBucket }
+    }
+
+    func toggleCheck(for id: UUID) {
+        guard let index = photoCards.firstIndex(where: { $0.id == id }) else { return }
+        photoCards[index].isChecked.toggle()
+
+        if photoCards[index].isChecked {
+            photoCards[index].isInBucket = false
+        }
+    }
+
+    func sendUncheckedToBucket() -> BucketActionResult {
+        var newlyAdded = 0
+
+        for index in photoCards.indices {
+            if photoCards[index].isChecked {
+                photoCards[index].isInBucket = false
+            } else {
+                if !photoCards[index].isInBucket {
+                    newlyAdded += 1
+                }
+                photoCards[index].isInBucket = true
+            }
+        }
+
+        return BucketActionResult(totalItems: bucketItems.count, newlyAdded: newlyAdded)
+    }
+
+    func clearBucketAfterDeletion() {
+        for index in photoCards.indices {
+            if photoCards[index].isInBucket {
+                photoCards[index].isInBucket = false
+                photoCards[index].isChecked = false
+            }
+        }
+    }
+}
+
+struct ContentView: View {
+    @StateObject private var viewModel = DummyGroupViewModel()
     @State private var isBucketAlertPresented = false
+    @State private var bucketAlertMessage = ""
     @State private var isDeleteSheetPresented = false
-    private let dummyBucketItems = [
-        "未チェックの写真 #1",
-        "未チェックの写真 #2",
-        "未チェックの写真 #3"
-    ]
 
     var body: some View {
         NavigationStack {
@@ -43,15 +102,19 @@ struct ContentView: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 16) {
-                        ForEach($photoCards) { $card in
-                            PhotoCardView(card: $card)
+                        ForEach(viewModel.photoCards) { card in
+                            PhotoCardView(card: card) {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                    viewModel.toggleCheck(for: card.id)
+                                }
+                            }
                         }
                     }
                     .padding(.vertical, 4)
                 }
 
                 Button {
-                    isBucketAlertPresented = true
+                    handleBucketAction()
                 } label: {
                     Text("チェック以外をバケツへ")
                         .font(.headline)
@@ -78,17 +141,37 @@ struct ContentView: View {
             .alert("ダミーアクション", isPresented: $isBucketAlertPresented) {
                 Button("OK", role: .cancel) { }
             } message: {
-                Text("S2 段階ではチェック済み以外をバケツに送る処理は未実装です。アラートが出れば UI イベントが通っています。")
+                Text(bucketAlertMessage)
             }
             .sheet(isPresented: $isDeleteSheetPresented) {
-                DeleteConfirmationSheet(items: dummyBucketItems)
+                DeleteConfirmationSheet(items: viewModel.bucketItems) {
+                    viewModel.clearBucketAfterDeletion()
+                }
             }
+        }
+    }
+
+    private func handleBucketAction() {
+        let result = viewModel.sendUncheckedToBucket()
+        bucketAlertMessage = alertMessage(for: result)
+        isBucketAlertPresented = true
+    }
+
+    private func alertMessage(for result: BucketActionResult) -> String {
+        switch (result.totalItems, result.newlyAdded) {
+        case (0, _):
+            return "未チェックの写真がないため、バケツは空のままです。"
+        case (_, 0):
+            return "バケツに新しく追加される写真はありませんでした（計\(result.totalItems)枚）。"
+        default:
+            return "未チェックの写真\(result.newlyAdded)枚をバケツに入れました（計\(result.totalItems)枚）。"
         }
     }
 }
 
 private struct PhotoCardView: View {
-    @Binding var card: DummyPhotoCard
+    let card: DummyPhotoCard
+    let onToggle: () -> Void
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -101,7 +184,7 @@ private struct PhotoCardView: View {
                         Text(card.title)
                             .font(.headline)
                             .foregroundStyle(.white)
-                        Text(card.isChecked ? "チェック済み（残す）" : "未チェック（削除候補）")
+                        Text(card.isChecked ? "チェック済み（残す）" : (card.isInBucket ? "バケツ候補" : "未チェック（削除候補）"))
                             .font(.caption)
                             .fontWeight(.medium)
                             .foregroundStyle(.white.opacity(0.85))
@@ -126,12 +209,12 @@ private struct PhotoCardView: View {
         }
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .onTapGesture {
-            card.isChecked.toggle()
+            onToggle()
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: card.isChecked)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(card.title)
-        .accessibilityValue(card.isChecked ? "チェック済み" : "未チェック")
+        .accessibilityValue(card.isChecked ? "チェック済み" : (card.isInBucket ? "バケツ候補" : "未チェック"))
         .accessibilityAddTraits(card.isChecked ? [.isSelected] : [])
     }
 }
@@ -154,15 +237,21 @@ private struct CheckBadge: View {
 }
 
 private struct DeleteConfirmationSheet: View {
-    let items: [String]
+    let items: [DummyPhotoCard]
+    let onConfirmDeletion: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
                 Section("削除候補（ダミー）") {
-                    ForEach(items, id: \.self) { item in
-                        Label(item, systemImage: "photo")
+                    if items.isEmpty {
+                        Label("削除候補はありません", systemImage: "checkmark.circle")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(items) { item in
+                            Label(item.title, systemImage: "photo")
+                        }
                     }
                 }
             }
@@ -177,6 +266,7 @@ private struct DeleteConfirmationSheet: View {
             }
             .safeAreaInset(edge: .bottom) {
                 Button {
+                    onConfirmDeletion()
                     dismiss()
                 } label: {
                     Text("チェックの無い画像を削除（ダミー）")
@@ -186,6 +276,7 @@ private struct DeleteConfirmationSheet: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .padding()
+                .disabled(items.isEmpty)
             }
         }
     }
