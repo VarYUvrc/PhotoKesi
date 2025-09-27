@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Combine
+import Photos
 
 struct DummyPhotoCard: Identifiable {
     let id: UUID
@@ -84,13 +85,56 @@ final class DummyGroupViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var viewModel = DummyGroupViewModel()
+    @StateObject private var permissionViewModel = PhotoAuthorizationViewModel()
     @State private var isBucketAlertPresented = false
     @State private var bucketAlertMessage = ""
     @State private var isDeleteSheetPresented = false
 
     var body: some View {
+        Group {
+            switch permissionViewModel.status {
+            case .authorized:
+                authorizedContent(showLimitedBanner: false)
+            case .limited:
+                authorizedContent(showLimitedBanner: true)
+            case .notDetermined:
+                AuthorizationRequestView(onRequest: permissionViewModel.requestAuthorization)
+            case .denied, .restricted:
+                AuthorizationDeniedView(onOpenSettings: permissionViewModel.openSettings)
+            @unknown default:
+                AuthorizationDeniedView(onOpenSettings: permissionViewModel.openSettings)
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: permissionViewModel.status)
+    }
+
+    private func handleBucketAction() {
+        let result = viewModel.sendUncheckedToBucket()
+        bucketAlertMessage = alertMessage(for: result)
+        isBucketAlertPresented = true
+    }
+
+    private func alertMessage(for result: BucketActionResult) -> String {
+        switch (result.totalItems, result.newlyAdded) {
+        case (0, _):
+            return "未チェックの写真がないため、バケツは空のままです。"
+        case (_, 0):
+            return "バケツに新しく追加される写真はありませんでした（計\(result.totalItems)枚）。"
+        default:
+            return "未チェックの写真\(result.newlyAdded)枚をバケツに入れました（計\(result.totalItems)枚）。"
+        }
+    }
+}
+
+private extension ContentView {
+    @ViewBuilder
+    func authorizedContent(showLimitedBanner: Bool) -> some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 24) {
+                if showLimitedBanner {
+                    LimitedAccessBanner(onOpenSettings: permissionViewModel.openSettings)
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("仮の類似グループ")
                         .font(.title2)
@@ -148,23 +192,6 @@ struct ContentView: View {
                     viewModel.clearBucketAfterDeletion()
                 }
             }
-        }
-    }
-
-    private func handleBucketAction() {
-        let result = viewModel.sendUncheckedToBucket()
-        bucketAlertMessage = alertMessage(for: result)
-        isBucketAlertPresented = true
-    }
-
-    private func alertMessage(for result: BucketActionResult) -> String {
-        switch (result.totalItems, result.newlyAdded) {
-        case (0, _):
-            return "未チェックの写真がないため、バケツは空のままです。"
-        case (_, 0):
-            return "バケツに新しく追加される写真はありませんでした（計\(result.totalItems)枚）。"
-        default:
-            return "未チェックの写真\(result.newlyAdded)枚をバケツに入れました（計\(result.totalItems)枚）。"
         }
     }
 }
@@ -279,6 +306,121 @@ private struct DeleteConfirmationSheet: View {
                 .disabled(items.isEmpty)
             }
         }
+    }
+}
+
+private struct AuthorizationRequestView: View {
+    let onRequest: () -> Void
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 72, weight: .light))
+                .foregroundStyle(Color.accentColor)
+
+            VStack(spacing: 12) {
+                Text("写真ライブラリへのアクセスを許可してください")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                Text("類似写真を束ねて整理するには、端末のフォトライブラリにアクセスする必要があります。許可後も限定アクセスから開始でき、後で設定から変更できます。")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button {
+                onRequest()
+            } label: {
+                Text("写真へのアクセスを許可")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.indigo)
+
+            Spacer()
+        }
+        .padding(32)
+    }
+}
+
+private struct AuthorizationDeniedView: View {
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 64, weight: .regular))
+                .foregroundStyle(.orange)
+
+            VStack(spacing: 12) {
+                Text("写真へのアクセスが許可されていません")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                Text("設定アプリから PhotoKesi に写真ライブラリへのアクセスを許可してください。限定アクセスを選択してもアプリは利用できますが、完全アクセスにすると自動整理がよりスムーズになります。")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button {
+                onOpenSettings()
+            } label: {
+                Text("設定を開く")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.indigo)
+
+            Spacer()
+        }
+        .padding(32)
+    }
+}
+
+private struct LimitedAccessBanner: View {
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "shield.lefthalf.filled")
+                    .foregroundStyle(.yellow)
+                Text("現在は限定アクセスで写真を利用しています")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+            }
+
+            Text("必要な写真だけを手動で選んでいる状態です。設定から PhotoKesi に完全アクセスを付与すると、毎回選び直す手間なく整理を進められます。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Button(role: .none) {
+                onOpenSettings()
+            } label: {
+                Text("設定で完全アクセスを許可")
+                    .font(.footnote.weight(.semibold))
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 12)
+                    .background(Capsule().fill(Color.indigo.opacity(0.15)))
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.quaternary)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.indigo.opacity(0.35))
+        )
     }
 }
 
