@@ -12,6 +12,9 @@ struct ContentView: View {
     @StateObject private var libraryViewModel = PhotoLibraryViewModel()
     @StateObject private var permissionViewModel = PhotoAuthorizationViewModel()
     @State private var hasLoadedInitialThumbnails = false
+    @State private var isBucketAlertPresented = false
+    @State private var bucketAlertMessage = ""
+    @State private var isDeleteSheetPresented = false
 
     var body: some View {
         Group {
@@ -48,57 +51,124 @@ struct ContentView: View {
 }
 
 private extension ContentView {
-    @ViewBuilder
     func authorizedContent(showLimitedBanner: Bool) -> some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 24) {
-                if showLimitedBanner {
-                    LimitedAccessBanner(onOpenSettings: permissionViewModel.openSettings)
-                }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if showLimitedBanner {
+                        LimitedAccessBanner(onOpenSettings: permissionViewModel.openSettings)
+                    }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("最近の写真サムネイル")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Text("読み込み済みの写真から縮小サムネイルを即座に参照できるようになりました。")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    photoGroupSection
                 }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .alert("バケツに送信", isPresented: $isBucketAlertPresented) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(bucketAlertMessage)
+        }
+        .sheet(isPresented: $isDeleteSheetPresented) {
+            DeleteConfirmationSheet(items: libraryViewModel.bucketItems) {
+                libraryViewModel.clearBucketAfterDeletion()
+            }
+        }
+    }
 
-                Group {
-                    if libraryViewModel.isLoading {
-                        ProgressView("写真を読み込み中...")
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 32)
-                    } else if libraryViewModel.thumbnails.isEmpty {
-                        ContentUnavailableView(
-                            "サムネイルはまだありません",
-                            systemImage: "photo",
-                            description: Text("写真が読み込まれるとここに表示されます。")
-                        )
+    var photoGroupSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("最近の写真サムネイル")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text("実際の写真サムネイルに対して、チェックの切り替えやバケツ操作を試せます。今後はここを起点に本番仕様へ寄せていきます。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Group {
+                if libraryViewModel.isLoading {
+                    ProgressView("写真を読み込み中...")
                         .frame(maxWidth: .infinity, alignment: .center)
-                    } else {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 16) {
-                                ForEach(libraryViewModel.thumbnails) { thumbnail in
-                                    PhotoThumbnailCard(thumbnail: thumbnail)
+                        .padding(.vertical, 32)
+                } else if libraryViewModel.thumbnails.isEmpty {
+                    ContentUnavailableView(
+                        "サムネイルはまだありません",
+                        systemImage: "photo",
+                        description: Text("写真が読み込まれるとここに表示されます。")
+                    )
+                    .frame(maxWidth: .infinity, alignment: .center)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 16) {
+                            ForEach(libraryViewModel.thumbnails) { thumbnail in
+                                PhotoThumbnailCard(thumbnail: thumbnail) {
+                                    libraryViewModel.toggleCheck(for: thumbnail.id)
                                 }
                             }
-                            .padding(.vertical, 4)
                         }
+                        .padding(.vertical, 4)
                     }
                 }
-
-                Spacer()
             }
-            .padding(24)
-            .toolbar(.hidden, for: .navigationBar)
+
+            if !libraryViewModel.thumbnails.isEmpty {
+                actionButtons
+            }
+        }
+    }
+
+    var actionButtons: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                handleBucketAction()
+            } label: {
+                Text("チェック以外をバケツへ")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.indigo)
+
+            Button {
+                isDeleteSheetPresented = true
+            } label: {
+                Text("バケツを空にする（削除確認）")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .disabled(libraryViewModel.bucketItems.isEmpty)
+        }
+    }
+
+    func handleBucketAction() {
+        let result = libraryViewModel.sendUncheckedToBucket()
+        bucketAlertMessage = alertMessage(for: result)
+        isBucketAlertPresented = true
+    }
+
+    private func alertMessage(for result: PhotoLibraryViewModel.BucketActionResult) -> String {
+        switch (result.totalItems, result.newlyAdded) {
+        case (0, _):
+            return "未チェックの写真がないため、バケツは空のままです。"
+        case (_, 0):
+            return "バケツに新しく追加される写真はありませんでした（計\(result.totalItems)枚）。"
+        default:
+            return "未チェックの写真\(result.newlyAdded)枚をバケツに入れました（計\(result.totalItems)枚）。"
         }
     }
 }
 
 private struct PhotoThumbnailCard: View {
     let thumbnail: PhotoLibraryViewModel.AssetThumbnail
+    let onToggle: () -> Void
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -108,47 +178,158 @@ private struct PhotoThumbnailCard: View {
     }()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ZStack(alignment: .bottomLeading) {
-                Image(uiImage: thumbnail.image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 200, height: 260)
-                    .clipped()
-                    .overlay(
-                        LinearGradient(
-                            colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
-                            startPoint: .center,
-                            endPoint: .bottom
-                        )
+        ZStack(alignment: .topTrailing) {
+            Image(uiImage: thumbnail.image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 200, height: 260)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
+                        startPoint: .center,
+                        endPoint: .bottom
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 6)
+                )
+                .overlay(alignment: .bottomLeading) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let creationDate = thumbnail.asset.creationDate {
+                            Text(Self.dateFormatter.string(from: creationDate))
+                                .font(.footnote)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.white.opacity(0.25))
+                                )
+                        }
+                    }
+                    .padding([.leading, .bottom], 16)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if thumbnail.isInBucket {
+                        BucketBadge()
+                            .padding([.trailing, .bottom], 16)
+                    }
+                }
+                .shadow(color: thumbnail.isChecked ? .white.opacity(0.25) : .black.opacity(0.2), radius: 12, x: 0, y: 6)
 
-                if let creationDate = thumbnail.asset.creationDate {
-                    Text(Self.dateFormatter.string(from: creationDate))
-                        .font(.footnote)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule()
-                                .fill(Color.white.opacity(0.25))
-                        )
-                        .padding([.leading, .bottom], 16)
+            CheckBadge(isChecked: thumbnail.isChecked)
+                .padding(16)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .onTapGesture {
+            onToggle()
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: thumbnail.isChecked)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("写真カード")
+        .accessibilityValue(thumbnail.isChecked ? "チェック済み" : (thumbnail.isInBucket ? "バケツ候補" : "未チェック"))
+    }
+}
+
+private struct CheckBadge: View {
+    let isChecked: Bool
+
+    var body: some View {
+        Label(isChecked ? "チェック済み" : "未チェック", systemImage: isChecked ? "checkmark.circle.fill" : "circle")
+            .font(.headline)
+            .labelStyle(.iconOnly)
+            .padding(10)
+            .background(
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.2), radius: 4)
+            )
+            .foregroundStyle(isChecked ? Color.green : Color.white.opacity(0.8))
+    }
+}
+
+private struct BucketBadge: View {
+    var body: some View {
+        Text("バケツ候補")
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(Color.red.opacity(0.65))
+            )
+    }
+}
+
+private struct DeleteConfirmationSheet: View {
+    let items: [PhotoLibraryViewModel.AssetThumbnail]
+    let onConfirmDeletion: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("削除候補（ダミー）") {
+                    if items.isEmpty {
+                        Label("削除候補はありません", systemImage: "checkmark.circle")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(items) { item in
+                            HStack(spacing: 12) {
+                                Image(uiImage: item.image)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 48, height: 48)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    if let creationDate = item.asset.creationDate {
+                                        Text(Self.dateFormatter.string(from: creationDate))
+                                    } else {
+                                        Text("撮影日時不明")
+                                    }
+                                    Text(item.asset.localIdentifier)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
                 }
             }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
-    }
-
-    private var accessibilityLabel: String {
-        if let creationDate = thumbnail.asset.creationDate {
-            return "写真、\(Self.dateFormatter.string(from: creationDate))"
-        } else {
-            return "写真"
+            .listStyle(.insetGrouped)
+            .navigationTitle("削除確認")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") {
+                        dismiss()
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    onConfirmDeletion()
+                    dismiss()
+                } label: {
+                    Text("チェックの無い画像を削除（ダミー）")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+                .disabled(items.isEmpty)
+            }
         }
     }
 }
