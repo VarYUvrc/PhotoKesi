@@ -6,89 +6,12 @@
 //
 
 import SwiftUI
-import Combine
 import Photos
 
-struct DummyPhotoCard: Identifiable {
-    let id: UUID
-    let title: String
-    let symbolName: String
-    let baseColor: Color
-    var isChecked: Bool
-    var isInBucket: Bool
-
-    init(id: UUID = UUID(), title: String, symbolName: String, baseColor: Color, isChecked: Bool, isInBucket: Bool = false) {
-        self.id = id
-        self.title = title
-        self.symbolName = symbolName
-        self.baseColor = baseColor
-        self.isChecked = isChecked
-        self.isInBucket = isInBucket
-    }
-}
-
-struct BucketActionResult {
-    let totalItems: Int
-    let newlyAdded: Int
-}
-
-final class DummyGroupViewModel: ObservableObject {
-    @Published private(set) var photoCards: [DummyPhotoCard]
-
-    init(photoCards: [DummyPhotoCard] = [
-        DummyPhotoCard(title: "ベストショット", symbolName: "star.fill", baseColor: .orange, isChecked: true),
-        DummyPhotoCard(title: "類似候補A", symbolName: "photo.fill", baseColor: .teal, isChecked: false),
-        DummyPhotoCard(title: "類似候補B", symbolName: "camera.macro", baseColor: .purple, isChecked: false)
-    ]) {
-        self.photoCards = photoCards
-    }
-
-    var bucketItems: [DummyPhotoCard] {
-        photoCards.filter { $0.isInBucket }
-    }
-
-    func toggleCheck(for id: UUID) {
-        guard let index = photoCards.firstIndex(where: { $0.id == id }) else { return }
-        photoCards[index].isChecked.toggle()
-
-        if photoCards[index].isChecked {
-            photoCards[index].isInBucket = false
-        }
-    }
-
-    func sendUncheckedToBucket() -> BucketActionResult {
-        var newlyAdded = 0
-
-        for index in photoCards.indices {
-            if photoCards[index].isChecked {
-                photoCards[index].isInBucket = false
-            } else {
-                if !photoCards[index].isInBucket {
-                    newlyAdded += 1
-                }
-                photoCards[index].isInBucket = true
-            }
-        }
-
-        return BucketActionResult(totalItems: bucketItems.count, newlyAdded: newlyAdded)
-    }
-
-    func clearBucketAfterDeletion() {
-        for index in photoCards.indices {
-            if photoCards[index].isInBucket {
-                photoCards[index].isInBucket = false
-                photoCards[index].isChecked = false
-            }
-        }
-    }
-}
-
 struct ContentView: View {
-    @StateObject private var viewModel = DummyGroupViewModel()
+    @StateObject private var libraryViewModel = PhotoLibraryViewModel()
     @StateObject private var permissionViewModel = PhotoAuthorizationViewModel()
-    @State private var isBucketAlertPresented = false
-    @State private var bucketAlertMessage = ""
-    @State private var isDeleteSheetPresented = false
+    @State private var hasLoadedInitialThumbnails = false
 
     var body: some View {
         Group {
@@ -105,23 +28,21 @@ struct ContentView: View {
                 AuthorizationDeniedView(onOpenSettings: permissionViewModel.openSettings)
             }
         }
+        .task(id: permissionViewModel.status) {
+            await handleAuthorizationStatusChange(permissionViewModel.status)
+        }
         .animation(.easeInOut(duration: 0.22), value: permissionViewModel.status)
     }
 
-    private func handleBucketAction() {
-        let result = viewModel.sendUncheckedToBucket()
-        bucketAlertMessage = alertMessage(for: result)
-        isBucketAlertPresented = true
-    }
-
-    private func alertMessage(for result: BucketActionResult) -> String {
-        switch (result.totalItems, result.newlyAdded) {
-        case (0, _):
-            return "未チェックの写真がないため、バケツは空のままです。"
-        case (_, 0):
-            return "バケツに新しく追加される写真はありませんでした（計\(result.totalItems)枚）。"
+    private func handleAuthorizationStatusChange(_ status: PHAuthorizationStatus) async {
+        switch status {
+        case .authorized, .limited:
+            guard !hasLoadedInitialThumbnails else { return }
+            hasLoadedInitialThumbnails = true
+            await libraryViewModel.loadThumbnails()
         default:
-            return "未チェックの写真\(result.newlyAdded)枚をバケツに入れました（計\(result.totalItems)枚）。"
+            hasLoadedInitialThumbnails = false
+            libraryViewModel.reset()
         }
     }
 }
@@ -136,175 +57,98 @@ private extension ContentView {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("仮の類似グループ")
+                    Text("最近の写真サムネイル")
                         .font(.title2)
                         .fontWeight(.semibold)
-                    Text("カードをタップしてチェックを切り替える挙動のみを確認するステップです。")
+                    Text("読み込み済みの写真から縮小サムネイルを即座に参照できるようになりました。")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 16) {
-                        ForEach(viewModel.photoCards) { card in
-                            PhotoCardView(card: card) {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                                    viewModel.toggleCheck(for: card.id)
+                Group {
+                    if libraryViewModel.isLoading {
+                        ProgressView("写真を読み込み中...")
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 32)
+                    } else if libraryViewModel.thumbnails.isEmpty {
+                        ContentUnavailableView(
+                            "サムネイルはまだありません",
+                            systemImage: "photo",
+                            description: Text("写真が読み込まれるとここに表示されます。")
+                        )
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    } else {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 16) {
+                                ForEach(libraryViewModel.thumbnails) { thumbnail in
+                                    PhotoThumbnailCard(thumbnail: thumbnail)
                                 }
                             }
+                            .padding(.vertical, 4)
                         }
                     }
-                    .padding(.vertical, 4)
                 }
-
-                Button {
-                    handleBucketAction()
-                } label: {
-                    Text("チェック以外をバケツへ")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.indigo)
-
-                Button {
-                    isDeleteSheetPresented = true
-                } label: {
-                    Text("バケツを空にする（ダミー）")
-                        .font(.subheadline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
 
                 Spacer()
             }
             .padding(24)
-            .alert("ダミーアクション", isPresented: $isBucketAlertPresented) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text(bucketAlertMessage)
-            }
-            .sheet(isPresented: $isDeleteSheetPresented) {
-                DeleteConfirmationSheet(items: viewModel.bucketItems) {
-                    viewModel.clearBucketAfterDeletion()
-                }
-            }
             .toolbar(.hidden, for: .navigationBar)
         }
     }
 }
 
-private struct PhotoCardView: View {
-    let card: DummyPhotoCard
-    let onToggle: () -> Void
+private struct PhotoThumbnailCard: View {
+    let thumbnail: PhotoLibraryViewModel.AssetThumbnail
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(card.baseColor.gradient)
-                .frame(width: 200, height: 260)
-                .shadow(color: card.isChecked ? card.baseColor.opacity(0.35) : .black.opacity(0.15), radius: 12, x: 0, y: 6)
-                .overlay(alignment: .bottom) {
-                    VStack(spacing: 8) {
-                        Text(card.title)
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                        Text(card.isChecked ? "チェック済み（残す）" : (card.isInBucket ? "バケツ候補" : "未チェック（削除候補）"))
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.white.opacity(0.85))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .fill(.black.opacity(0.25))
-                            )
-                    }
-                    .padding(.bottom, 16)
-                }
-                .overlay {
-                    Image(systemName: card.symbolName)
-                        .font(.system(size: 64, weight: .light))
-                        .foregroundStyle(.white.opacity(0.8))
-                        .offset(y: -28)
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            ZStack(alignment: .bottomLeading) {
+                Image(uiImage: thumbnail.image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 200, height: 260)
+                    .clipped()
+                    .overlay(
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 6)
 
-            CheckBadge(isChecked: card.isChecked)
-                .padding(16)
+                if let creationDate = thumbnail.asset.creationDate {
+                    Text(Self.dateFormatter.string(from: creationDate))
+                        .font(.footnote)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Color.white.opacity(0.25))
+                        )
+                        .padding([.leading, .bottom], 16)
+                }
+            }
         }
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onTapGesture {
-            onToggle()
-        }
-        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: card.isChecked)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(card.title)
-        .accessibilityValue(card.isChecked ? "チェック済み" : (card.isInBucket ? "バケツ候補" : "未チェック"))
-        .accessibilityAddTraits(card.isChecked ? [.isSelected] : [])
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
     }
-}
 
-private struct CheckBadge: View {
-    let isChecked: Bool
-
-    var body: some View {
-        Label(isChecked ? "チェック済み" : "未チェック", systemImage: isChecked ? "checkmark.circle.fill" : "circle")
-            .font(.headline)
-            .labelStyle(.iconOnly)
-            .padding(10)
-            .background(
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.2), radius: 4)
-            )
-            .foregroundStyle(isChecked ? Color.green : Color.white.opacity(0.8))
-    }
-}
-
-private struct DeleteConfirmationSheet: View {
-    let items: [DummyPhotoCard]
-    let onConfirmDeletion: () -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("削除候補（ダミー）") {
-                    if items.isEmpty {
-                        Label("削除候補はありません", systemImage: "checkmark.circle")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(items) { item in
-                            Label(item.title, systemImage: "photo")
-                        }
-                    }
-                }
-            }
-            .listStyle(.insetGrouped)
-            .navigationTitle("削除確認")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") {
-                        dismiss()
-                    }
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                Button {
-                    onConfirmDeletion()
-                    dismiss()
-                } label: {
-                    Text("チェックの無い画像を削除（ダミー）")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                }
-                .buttonStyle(.borderedProminent)
-                .padding()
-                .disabled(items.isEmpty)
-            }
+    private var accessibilityLabel: String {
+        if let creationDate = thumbnail.asset.creationDate {
+            return "写真、\(Self.dateFormatter.string(from: creationDate))"
+        } else {
+            return "写真"
         }
     }
 }
