@@ -22,6 +22,12 @@ struct ContentView: View {
         DummyPhotoCard(title: "類似候補B", symbolName: "camera.macro", baseColor: .purple, isChecked: false)
     ]
     @State private var isBucketAlertPresented = false
+    @State private var isDeleteSheetPresented = false
+    private let dummyBucketItems = [
+        "未チェックの写真 #1",
+        "未チェックの写真 #2",
+        "未チェックの写真 #3"
+    ]
 
     var body: some View {
         NavigationStack {
@@ -55,6 +61,16 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.indigo)
 
+                Button {
+                    isDeleteSheetPresented = true
+                } label: {
+                    Text("バケツを空にする（ダミー）")
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.bordered)
+
                 Spacer()
             }
             .padding(24)
@@ -63,6 +79,9 @@ struct ContentView: View {
                 Button("OK", role: .cancel) { }
             } message: {
                 Text("S2 段階ではチェック済み以外をバケツに送る処理は未実装です。アラートが出れば UI イベントが通っています。")
+            }
+            .sheet(isPresented: $isDeleteSheetPresented) {
+                DeleteConfirmationSheet(items: dummyBucketItems)
             }
         }
     }
@@ -131,6 +150,44 @@ private struct CheckBadge: View {
                     .shadow(color: .black.opacity(0.2), radius: 4)
             )
             .foregroundStyle(isChecked ? Color.green : Color.white.opacity(0.8))
+    }
+}
+
+private struct DeleteConfirmationSheet: View {
+    let items: [String]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("削除候補（ダミー）") {
+                    ForEach(items, id: \.self) { item in
+                        Label(item, systemImage: "photo")
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("削除確認")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("閉じる") {
+                        dismiss()
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    dismiss()
+                } label: {
+                    Text("チェックの無い画像を削除（ダミー）")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+            }
+        }
     }
 }
 
