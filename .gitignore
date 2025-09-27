@@ -1,0 +1,15 @@
+# Xcode 個人設定・一時ファイル（コミットしない）
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+**/*.xcuserdatad/
+**/*.xcuserstate
+**/*.xcscmblueprint
+
+# ビルド成果物
+DerivedData/
+build/
+.swiftpm/
+.build/
+
+# macOS
+.DS_Store
