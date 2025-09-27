@@ -167,6 +167,8 @@ Free と MAX を**表形式**で並べ、丸×で出来ること／出来ない�
 ## 開発メモ
 
 * フレームワーク：PhotoKit、Core Image、Accelerate（vImage / vDSP）
+* サムネイル取得は `PhotoThumbnailCache` が `PHCachingImageManager` と `NSCache` を組み合わせ、非同期で縮小画像をキャッシュする。
+* `PhotoLibraryViewModel` が `PHAsset` のフェッチとサムネイルの公開を担い、UI は実データを表示する。
 * データ保存：アプリ内に暗号化して保存（指標やフラグ、統計値）
 * 例外系：権限が限定のときでも最小限で動作し、完全アクセスを丁寧に案内
 
