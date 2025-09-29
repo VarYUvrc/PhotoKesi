@@ -19,15 +19,39 @@ final class PhotoLibraryViewModel: ObservableObject {
         let newlyAdded: Int
     }
 
-    @Published private(set) var thumbnails: [AssetThumbnail] = []
+    @Published private(set) var currentGroup: [AssetThumbnail] = []
     @Published private(set) var isLoading: Bool = false
+    @Published private(set) var currentGroupIndex: Int = 0
+    @Published var groupingWindowMinutes: Int = 60 {
+        didSet {
+            let clamped = max(Self.minGroupingMinutes, min(groupingWindowMinutes, Self.maxGroupingMinutes))
+            if groupingWindowMinutes != clamped {
+                groupingWindowMinutes = clamped
+                return
+            }
+
+            if oldValue != groupingWindowMinutes {
+                regroupThumbnailsFromRaw(resetGroupIndex: false)
+            }
+        }
+    }
 
     var bucketItems: [AssetThumbnail] {
-        thumbnails.filter { $0.isInBucket }
+        currentGroup.filter { $0.isInBucket }
     }
+
+    var groupCount: Int {
+        groupedThumbnails.count
+    }
+
+    static let minGroupingMinutes = 15
+    static let maxGroupingMinutes = 240
 
     private let thumbnailCache: PhotoThumbnailCache
     private let fetchOptions: PHFetchOptions
+
+    private var groupedThumbnails: [[AssetThumbnail]] = []
+    private var rawThumbnails: [AssetThumbnail] = []
 
     init(thumbnailCache: PhotoThumbnailCache = .shared,
          fetchOptions: PHFetchOptions? = nil) {
@@ -44,7 +68,7 @@ final class PhotoLibraryViewModel: ObservableObject {
 
         let fetchResult = PHAsset.fetchAssets(with: .image, options: fetchOptions)
         guard fetchResult.count > 0 else {
-            thumbnails = []
+            reset()
             return
         }
 
@@ -67,30 +91,40 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
 
         if !newThumbnails.isEmpty {
-            newThumbnails[0].isChecked = true
+            if !newThumbnails.contains(where: { $0.isChecked }) {
+                newThumbnails[0].isChecked = true
+            }
         }
 
-        thumbnails = newThumbnails
+        setRawThumbnails(newThumbnails)
     }
 
     func reset() {
-        thumbnails = []
+        rawThumbnails = []
+        groupedThumbnails = []
+        currentGroup = []
+        currentGroupIndex = 0
     }
 
     func toggleCheck(for assetIdentifier: String) {
-        var updated = thumbnails
-        guard let index = updated.firstIndex(where: { $0.id == assetIdentifier }) else { return }
+        guard !currentGroup.isEmpty else { return }
+        var updatedGroup = currentGroup
+        guard let index = updatedGroup.firstIndex(where: { $0.id == assetIdentifier }) else { return }
 
-        updated[index].isChecked.toggle()
-        if updated[index].isChecked {
-            updated[index].isInBucket = false
+        updatedGroup[index].isChecked.toggle()
+        if updatedGroup[index].isChecked {
+            updatedGroup[index].isInBucket = false
         }
 
-        thumbnails = updated
+        applyUpdatedCurrentGroup(updatedGroup)
     }
 
     func sendUncheckedToBucket() -> BucketActionResult {
-        var updated = thumbnails
+        guard !currentGroup.isEmpty else {
+            return BucketActionResult(totalItems: 0, newlyAdded: 0)
+        }
+
+        var updated = currentGroup
         var newlyAdded = 0
 
         for index in updated.indices {
@@ -106,14 +140,16 @@ final class PhotoLibraryViewModel: ObservableObject {
             }
         }
 
-        thumbnails = updated
+        applyUpdatedCurrentGroup(updated)
 
         let total = updated.filter { $0.isInBucket }.count
         return BucketActionResult(totalItems: total, newlyAdded: newlyAdded)
     }
 
     func clearBucketAfterDeletion() {
-        var updated = thumbnails
+        guard !currentGroup.isEmpty else { return }
+
+        var updated = currentGroup
 
         for index in updated.indices where updated[index].isInBucket {
             updated[index].isInBucket = false
@@ -124,7 +160,7 @@ final class PhotoLibraryViewModel: ObservableObject {
             updated[0].isChecked = true
         }
 
-        thumbnails = updated
+        applyUpdatedCurrentGroup(updated)
     }
 
     nonisolated private static func defaultFetchOptions() -> PHFetchOptions {
@@ -133,5 +169,102 @@ final class PhotoLibraryViewModel: ObservableObject {
         options.includeHiddenAssets = false
         options.includeAllBurstAssets = false
         return options
+    }
+
+    private func setRawThumbnails(_ thumbnails: [AssetThumbnail]) {
+        rawThumbnails = thumbnails
+        regroupThumbnailsFromRaw(resetGroupIndex: true)
+    }
+
+    private func regroupThumbnailsFromRaw(resetGroupIndex: Bool) {
+        guard !rawThumbnails.isEmpty else {
+            groupedThumbnails = []
+            currentGroup = []
+            currentGroupIndex = 0
+            return
+        }
+
+        var grouped = groupThumbnails(rawThumbnails)
+
+        for index in grouped.indices {
+            ensureDefaultCheck(in: &grouped[index])
+        }
+
+        groupedThumbnails = grouped
+
+        if groupedThumbnails.isEmpty {
+            currentGroup = []
+            currentGroupIndex = 0
+            return
+        }
+
+        if resetGroupIndex || currentGroupIndex >= groupedThumbnails.count {
+            currentGroupIndex = 0
+        }
+
+        currentGroup = groupedThumbnails[currentGroupIndex]
+    }
+
+    private func ensureDefaultCheck(in group: inout [AssetThumbnail]) {
+        guard !group.isEmpty else { return }
+        if !group.contains(where: { $0.isChecked }) {
+            group[0].isChecked = true
+        }
+    }
+
+    private func applyUpdatedCurrentGroup(_ updatedGroup: [AssetThumbnail]) {
+        if groupedThumbnails.indices.contains(currentGroupIndex) {
+            groupedThumbnails[currentGroupIndex] = updatedGroup
+        }
+
+        currentGroup = updatedGroup
+
+        for item in updatedGroup {
+            if let rawIndex = rawThumbnails.firstIndex(where: { $0.id == item.id }) {
+                rawThumbnails[rawIndex] = item
+            }
+        }
+    }
+
+    private func groupThumbnails(_ thumbnails: [AssetThumbnail]) -> [[AssetThumbnail]] {
+        guard !thumbnails.isEmpty else { return [] }
+
+        let window = TimeInterval(groupingWindowMinutes * 60)
+        var groups: [[AssetThumbnail]] = []
+        var current: [AssetThumbnail] = []
+        var lastDate: Date?
+
+        for thumbnail in thumbnails {
+            guard let creationDate = thumbnail.asset.creationDate else {
+                if current.count > 1 {
+                    groups.append(current)
+                }
+                current = []
+                lastDate = nil
+                continue
+            }
+
+            if let last = lastDate {
+                let delta = abs(last.timeIntervalSince(creationDate))
+                if delta <= window {
+                    current.append(thumbnail)
+                } else {
+                    if current.count > 1 {
+                        groups.append(current)
+                    }
+                    current = [thumbnail]
+                }
+            } else {
+                current = [thumbnail]
+            }
+
+            lastDate = creationDate
+        }
+
+        if current.count > 1 {
+            groups.append(current)
+        }
+
+        return groups
     }
 }
