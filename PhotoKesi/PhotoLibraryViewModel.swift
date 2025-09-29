@@ -192,12 +192,17 @@ final class PhotoLibraryViewModel: ObservableObject {
 
         groupedThumbnails = grouped
 
+        if groupedThumbnails.isEmpty {
+            currentGroup = []
+            currentGroupIndex = 0
+            return
+        }
+
         if resetGroupIndex || currentGroupIndex >= groupedThumbnails.count {
             currentGroupIndex = 0
         }
 
         currentGroup = groupedThumbnails[currentGroupIndex]
-        rawThumbnails = groupedThumbnails.flatMap { $0 }
     }
 
     private func ensureDefaultCheck(in group: inout [AssetThumbnail]) {
@@ -208,14 +213,17 @@ final class PhotoLibraryViewModel: ObservableObject {
     }
 
     private func applyUpdatedCurrentGroup(_ updatedGroup: [AssetThumbnail]) {
-        guard groupedThumbnails.indices.contains(currentGroupIndex) else {
-            currentGroup = updatedGroup
-            return
+        if groupedThumbnails.indices.contains(currentGroupIndex) {
+            groupedThumbnails[currentGroupIndex] = updatedGroup
         }
 
-        groupedThumbnails[currentGroupIndex] = updatedGroup
         currentGroup = updatedGroup
-        rawThumbnails = groupedThumbnails.flatMap { $0 }
+
+        for item in updatedGroup {
+            if let rawIndex = rawThumbnails.firstIndex(where: { $0.id == item.id }) {
+                rawThumbnails[rawIndex] = item
+            }
+        }
     }
 
     private func groupThumbnails(_ thumbnails: [AssetThumbnail]) -> [[AssetThumbnail]] {
@@ -224,37 +232,36 @@ final class PhotoLibraryViewModel: ObservableObject {
         let window = TimeInterval(groupingWindowMinutes * 60)
         var groups: [[AssetThumbnail]] = []
         var current: [AssetThumbnail] = []
+        var lastDate: Date?
 
         for thumbnail in thumbnails {
             guard let creationDate = thumbnail.asset.creationDate else {
-                if !current.isEmpty {
+                if current.count > 1 {
                     groups.append(current)
-                    current = []
                 }
-                groups.append([thumbnail])
+                current = []
+                lastDate = nil
                 continue
             }
 
-            if current.isEmpty {
-                current.append(thumbnail)
-                continue
-            }
-
-            if let referenceDate = current.first?.asset.creationDate {
-                let delta = abs(referenceDate.timeIntervalSince(creationDate))
+            if let last = lastDate {
+                let delta = abs(last.timeIntervalSince(creationDate))
                 if delta <= window {
                     current.append(thumbnail)
                 } else {
-                    groups.append(current)
+                    if current.count > 1 {
+                        groups.append(current)
+                    }
                     current = [thumbnail]
                 }
             } else {
-                groups.append(current)
                 current = [thumbnail]
             }
+
+            lastDate = creationDate
         }
 
-        if !current.isEmpty {
+        if current.count > 1 {
             groups.append(current)
         }
 
