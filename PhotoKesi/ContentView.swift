@@ -64,7 +64,18 @@ private extension ContentView {
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .toolbar(.hidden, for: .navigationBar)
+            .navigationTitle("PhotoKesi")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        SettingsView(libraryViewModel: libraryViewModel)
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("設定を開く")
+                }
+            }
         }
         .alert("バケツに送信", isPresented: $isBucketAlertPresented) {
             Button("OK", role: .cancel) { }
@@ -84,9 +95,15 @@ private extension ContentView {
                 Text("最近の写真サムネイル")
                     .font(.title2)
                     .fontWeight(.semibold)
-                Text("実際の写真サムネイルに対して、チェックの切り替えやバケツ操作を試せます。今後はここを起点に本番仕様へ寄せていきます。")
+                Text("撮影時刻の近さでまとめた暫定グループを表示しています。チェックの切り替えやバケツ操作の流れを確認できます。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+
+                if libraryViewModel.groupCount > 0 {
+                    Text("現在のグループ: \(libraryViewModel.currentGroupIndex + 1) / \(libraryViewModel.groupCount) ・ 時間幅 \(libraryViewModel.groupingWindowMinutes)分")
+                        .font(.footnote)
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             Group {
@@ -94,7 +111,7 @@ private extension ContentView {
                     ProgressView("写真を読み込み中...")
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.vertical, 32)
-                } else if libraryViewModel.thumbnails.isEmpty {
+                } else if libraryViewModel.currentGroup.isEmpty {
                     ContentUnavailableView(
                         "サムネイルはまだありません",
                         systemImage: "photo",
@@ -104,7 +121,7 @@ private extension ContentView {
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 16) {
-                            ForEach(libraryViewModel.thumbnails) { thumbnail in
+                            ForEach(libraryViewModel.currentGroup) { thumbnail in
                                 PhotoThumbnailCard(thumbnail: thumbnail) {
                                     libraryViewModel.toggleCheck(for: thumbnail.id)
                                 }
@@ -115,7 +132,7 @@ private extension ContentView {
                 }
             }
 
-            if !libraryViewModel.thumbnails.isEmpty {
+            if !libraryViewModel.currentGroup.isEmpty {
                 actionButtons
             }
         }
