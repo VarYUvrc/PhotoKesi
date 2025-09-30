@@ -9,6 +9,7 @@ import SwiftUI
 import Photos
 
 struct ContentView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var libraryViewModel = PhotoLibraryViewModel()
     @StateObject private var permissionViewModel = PhotoAuthorizationViewModel()
 
@@ -55,16 +56,19 @@ struct ContentView: View {
 private extension ContentView {
     func authorizedContent(showLimitedBanner: Bool) -> some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
+            GeometryReader { proxy in
+                let metrics = LayoutMetrics(containerSize: proxy.size, dynamicType: dynamicTypeSize)
+
+                VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
                     if showLimitedBanner {
                         LimitedAccessBanner(onOpenSettings: permissionViewModel.openSettings)
                     }
 
-                    photoGroupSection
+                    photoGroupSection(metrics: metrics)
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(metrics.containerPadding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color(uiColor: .systemBackground))
             }
             .navigationTitle(currentModeTitle)
             .navigationBarTitleDisplayMode(.inline)
@@ -107,8 +111,8 @@ private extension ContentView {
         }
     }
 
-    var photoGroupSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    func photoGroupSection(metrics: LayoutMetrics) -> some View {
+        VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
             if libraryViewModel.groupCount > 0 {
                 Text("現在のグループ: \(libraryViewModel.currentGroupIndex + 1) / \(libraryViewModel.groupCount) ・ 時間幅 \(libraryViewModel.groupingWindowMinutes)分")
                     .font(.footnote)
@@ -117,7 +121,7 @@ private extension ContentView {
 
             Group {
                 if libraryViewModel.isLoading && !libraryViewModel.didFinishInitialLoad {
-                    PhotoBoardSkeletonView()
+                    PhotoBoardSkeletonView(metrics: metrics)
                 } else if libraryViewModel.currentGroup.isEmpty {
                     ContentUnavailableView(
                         "サムネイルはまだありません",
@@ -128,6 +132,7 @@ private extension ContentView {
                 } else {
                     PhotoGroupBoard(
                         group: libraryViewModel.currentGroup,
+                        metrics: metrics,
                         onToggleCheck: { id in
                             libraryViewModel.toggleCheck(for: id)
                         },
@@ -143,24 +148,27 @@ private extension ContentView {
             }
 
             if !libraryViewModel.currentGroup.isEmpty {
-                actionButtons
+                actionButtons(metrics: metrics)
             }
         }
     }
 
-    var actionButtons: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    func actionButtons(metrics: LayoutMetrics) -> some View {
+        VStack(alignment: .leading, spacing: metrics.buttonSpacing) {
             Button {
-                isDeleteSheetPresented = true
+                if libraryViewModel.bucketItems.isEmpty {
+                    libraryViewModel.advanceToNextGroup()
+                } else {
+                    isDeleteSheetPresented = true
+                }
             } label: {
-                Label("バケツを空にして次のグループへ", systemImage: "trash.slash")
+                Label("仕分けを完了して次のグループへ", systemImage: "trash.slash")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
+                    .padding(.vertical, metrics.buttonVerticalPadding)
             }
             .buttonStyle(.borderedProminent)
             .tint(.indigo)
-            .disabled(libraryViewModel.bucketItems.isEmpty)
         }
     }
 
@@ -168,6 +176,7 @@ private extension ContentView {
 
 private struct PhotoGroupBoard: View {
     let group: [PhotoLibraryViewModel.AssetThumbnail]
+    let metrics: LayoutMetrics
     let onToggleCheck: (String) -> Void
     let onSetCheck: (String, Bool) -> Void
     let onOpenViewer: (Int) -> Void
@@ -191,7 +200,7 @@ private struct PhotoGroupBoard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: metrics.boardSpacing) {
             boardSection(
                 title: "残す写真",
                 systemImage: "checkmark.circle.fill",
@@ -215,7 +224,7 @@ private struct PhotoGroupBoard: View {
                               systemImage: String,
                               thumbnails: [IndexedThumbnail],
                               isUpperRow: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: metrics.rowSpacing) {
             HStack(spacing: 8) {
                 Image(systemName: systemImage)
                     .foregroundStyle(isUpperRow ? Color.green : Color.secondary)
@@ -226,7 +235,7 @@ private struct PhotoGroupBoard: View {
             if thumbnails.isEmpty {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .fill(Color.secondary.opacity(0.08))
-                    .frame(height: 92)
+                    .frame(height: metrics.placeholderHeight)
                     .overlay(
                         Text(isUpperRow ? "チェックが付いた写真はここに並びます" : "未チェックの写真はここに並びます")
                             .font(.footnote)
@@ -234,11 +243,12 @@ private struct PhotoGroupBoard: View {
                     )
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 16) {
+                    LazyHStack(spacing: metrics.thumbnailSpacing) {
                         ForEach(thumbnails) { item in
                             PhotoThumbnailCard(
                                 thumbnail: item.thumbnail,
                                 isBest: item.index == 0,
+                                cardSize: metrics.cardSize,
                                 onOpenViewer: { onOpenViewer(item.index) },
                                 onToggleCheck: { onToggleCheck(item.thumbnail.id) },
                                 onSwipeUp: {
@@ -261,8 +271,10 @@ private struct PhotoGroupBoard: View {
 }
 
 private struct PhotoBoardSkeletonView: View {
+    let metrics: LayoutMetrics
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: metrics.boardSpacing) {
             skeletonRow(title: "残す写真")
             skeletonRow(title: "バケツ")
         }
@@ -272,22 +284,20 @@ private struct PhotoBoardSkeletonView: View {
 
     @ViewBuilder
     private func skeletonRow(title: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: metrics.rowSpacing) {
             HStack(spacing: 8) {
                 Image(systemName: "rectangle.stack.fill")
                 Text(title)
                     .font(.headline)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 16) {
-                    ForEach(0..<3, id: \.self) { _ in
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(Color.secondary.opacity(0.12))
-                            .frame(width: 200, height: 260)
-                    }
+            LazyHStack(spacing: metrics.thumbnailSpacing) {
+                ForEach(0..<3, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(width: metrics.cardSize.width, height: metrics.cardSize.height)
                 }
-                .padding(.vertical, 4)
             }
+            .padding(.vertical, 4)
         }
     }
 }
@@ -295,6 +305,7 @@ private struct PhotoBoardSkeletonView: View {
 private struct PhotoThumbnailCard: View {
     let thumbnail: PhotoLibraryViewModel.AssetThumbnail
     let isBest: Bool
+    let cardSize: CGSize
     let onOpenViewer: () -> Void
     let onToggleCheck: () -> Void
     let onSwipeUp: () -> Void
@@ -302,8 +313,6 @@ private struct PhotoThumbnailCard: View {
     let isToggleDisabled: Bool
     let allowSwipeUp: Bool
     let allowSwipeDown: Bool
-
-    private let cardSize = CGSize(width: 200, height: 260)
 
     var body: some View {
         let dragGesture = DragGesture(minimumDistance: 30)
@@ -580,18 +589,75 @@ private struct DeleteConfirmationSheet: View {
                     onConfirmDeletion()
                     dismiss()
                 } label: {
-                    Text("削除確定")
+                    Label("削除確定", systemImage: "trash.fill")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.red)
                 .padding()
                 .disabled(items.isEmpty)
             }
         }
     }
 }
+
+
+private struct LayoutMetrics {
+    let cardSize: CGSize
+    let sectionSpacing: CGFloat
+    let boardSpacing: CGFloat
+    let rowSpacing: CGFloat
+    let thumbnailSpacing: CGFloat
+    let containerPadding: EdgeInsets
+    let buttonVerticalPadding: CGFloat
+    let buttonSpacing: CGFloat
+    let placeholderHeight: CGFloat
+
+    init(containerSize: CGSize, dynamicType: DynamicTypeSize) {
+        let horizontalPadding: CGFloat = containerSize.width <= 360 ? 16 : 24
+        containerPadding = EdgeInsets(top: 24, leading: horizontalPadding, bottom: 24, trailing: horizontalPadding)
+
+        let isAccessibility = dynamicType.isAccessibilitySize
+
+        sectionSpacing = isAccessibility ? 18 : 20
+        boardSpacing = isAccessibility ? 14 : 18
+        rowSpacing = isAccessibility ? 10 : 12
+        thumbnailSpacing = isAccessibility ? 12 : 16
+        buttonVerticalPadding = isAccessibility ? 12 : 14
+        buttonSpacing = isAccessibility ? 10 : 12
+
+        let availableWidth = max(160, containerSize.width - horizontalPadding * 2)
+        var cardWidth = min(220, availableWidth * 0.55)
+        cardWidth = max(140, cardWidth)
+
+        var cardHeight = cardWidth * 1.08
+        let maxHeight = max(150, containerSize.height * 0.36)
+        cardHeight = min(cardHeight, maxHeight)
+        cardHeight = max(140, cardHeight)
+
+        if isAccessibility {
+            cardWidth = max(140, min(cardWidth, availableWidth * 0.5))
+            cardHeight = max(150, min(cardHeight, containerSize.height * 0.34))
+        }
+
+        cardSize = CGSize(width: cardWidth, height: cardHeight)
+        placeholderHeight = cardHeight + 12
+    }
+}
+
+private extension DynamicTypeSize {
+    var isAccessibilitySize: Bool {
+        switch self {
+        case .accessibility1, .accessibility2, .accessibility3, .accessibility4, .accessibility5:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 
 private struct AuthorizationRequestView: View {
     let onRequest: () -> Void
