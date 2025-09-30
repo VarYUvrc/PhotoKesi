@@ -22,6 +22,7 @@ final class PhotoLibraryViewModel: ObservableObject {
     @Published private(set) var currentGroup: [AssetThumbnail] = []
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var currentGroupIndex: Int = 0
+    @Published private(set) var didFinishInitialLoad: Bool = false
     @Published var groupingWindowMinutes: Int = 60 {
         didSet {
             let clamped = max(Self.minGroupingMinutes, min(groupingWindowMinutes, Self.maxGroupingMinutes))
@@ -64,11 +65,13 @@ final class PhotoLibraryViewModel: ObservableObject {
         guard !isLoading else { return }
 
         isLoading = true
+        didFinishInitialLoad = false
         defer { isLoading = false }
 
         let fetchResult = PHAsset.fetchAssets(with: .image, options: fetchOptions)
         guard fetchResult.count > 0 else {
             reset()
+            didFinishInitialLoad = true
             return
         }
 
@@ -97,6 +100,8 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
 
         setRawThumbnails(newThumbnails)
+
+        didFinishInitialLoad = true
     }
 
     func reset() {
@@ -104,6 +109,7 @@ final class PhotoLibraryViewModel: ObservableObject {
         groupedThumbnails = []
         currentGroup = []
         currentGroupIndex = 0
+        didFinishInitialLoad = false
     }
 
     func toggleCheck(for assetIdentifier: String) {

@@ -20,9 +20,9 @@ struct ContentView: View {
         Group {
             switch permissionViewModel.status {
             case .authorized:
-                authorizedContent(showLimitedBanner: false)
+                authorizedFlow(showLimitedBanner: false)
             case .limited:
-                authorizedContent(showLimitedBanner: true)
+                authorizedFlow(showLimitedBanner: true)
             case .notDetermined:
                 AuthorizationRequestView(onRequest: permissionViewModel.requestAuthorization)
             case .denied, .restricted:
@@ -51,6 +51,16 @@ struct ContentView: View {
 }
 
 private extension ContentView {
+    @ViewBuilder
+    func authorizedFlow(showLimitedBanner: Bool) -> some View {
+        if libraryViewModel.didFinishInitialLoad {
+            authorizedContent(showLimitedBanner: showLimitedBanner)
+        } else {
+            InitialLoadingView(isLimitedAccess: showLimitedBanner,
+                               isLoading: libraryViewModel.isLoading)
+        }
+    }
+
     func authorizedContent(showLimitedBanner: Bool) -> some View {
         NavigationStack {
             ScrollView {
@@ -348,6 +358,44 @@ private struct DeleteConfirmationSheet: View {
                 .disabled(items.isEmpty)
             }
         }
+    }
+}
+
+private struct InitialLoadingView: View {
+    let isLimitedAccess: Bool
+    let isLoading: Bool
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.indigo)
+                .scaleEffect(1.4)
+
+            VStack(spacing: 12) {
+                Text("写真ライブラリを準備中です")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+
+                Text(isLimitedAccess ? "選択された写真の読み込みとサムネイル生成を開始しています。完了するとメイン画面に切り替わります。" : "端末内の最近の写真を読み込み、サムネイル生成とキャッシュの準備を進めています。完了するとメイン画面に切り替わります。")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            if !isLoading {
+                Text("まもなく表示されます…")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer()
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
     }
 }
 
