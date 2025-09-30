@@ -5,18 +5,17 @@ import UIKit
 
 @MainActor
 final class PhotoLibraryViewModel: ObservableObject {
-    struct AssetThumbnail: Identifiable {
+    struct AssetThumbnail: Identifiable, Equatable {
         let asset: PHAsset
         let image: UIImage
         var isChecked: Bool = false
         var isInBucket: Bool = false
 
         var id: String { asset.localIdentifier }
-    }
 
-    struct BucketActionResult {
-        let totalItems: Int
-        let newlyAdded: Int
+        static func == (lhs: AssetThumbnail, rhs: AssetThumbnail) -> Bool {
+            lhs.id == rhs.id && lhs.isChecked == rhs.isChecked && lhs.isInBucket == rhs.isInBucket
+        }
     }
 
     @Published private(set) var currentGroup: [AssetThumbnail] = []
@@ -120,36 +119,24 @@ final class PhotoLibraryViewModel: ObservableObject {
         updatedGroup[index].isChecked.toggle()
         if updatedGroup[index].isChecked {
             updatedGroup[index].isInBucket = false
+        } else {
+            updatedGroup[index].isInBucket = true
         }
 
         applyUpdatedCurrentGroup(updatedGroup)
     }
 
-    func sendUncheckedToBucket() -> BucketActionResult {
-        guard !currentGroup.isEmpty else {
-            return BucketActionResult(totalItems: 0, newlyAdded: 0)
-        }
+    func setCheck(_ isChecked: Bool, for assetIdentifier: String) {
+        guard !currentGroup.isEmpty else { return }
+        var updatedGroup = currentGroup
+        guard let index = updatedGroup.firstIndex(where: { $0.id == assetIdentifier }) else { return }
 
-        var updated = currentGroup
-        var newlyAdded = 0
+        guard updatedGroup[index].isChecked != isChecked else { return }
 
-        for index in updated.indices {
-            if updated[index].isChecked {
-                if updated[index].isInBucket {
-                    updated[index].isInBucket = false
-                }
-            } else {
-                if !updated[index].isInBucket {
-                    newlyAdded += 1
-                }
-                updated[index].isInBucket = true
-            }
-        }
+        updatedGroup[index].isChecked = isChecked
+        updatedGroup[index].isInBucket = !isChecked
 
-        applyUpdatedCurrentGroup(updated)
-
-        let total = updated.filter { $0.isInBucket }.count
-        return BucketActionResult(totalItems: total, newlyAdded: newlyAdded)
+        applyUpdatedCurrentGroup(updatedGroup)
     }
 
     func clearBucketAfterDeletion() {
@@ -166,7 +153,19 @@ final class PhotoLibraryViewModel: ObservableObject {
             updated[0].isChecked = true
         }
 
+        for index in updated.indices {
+            updated[index].isInBucket = !updated[index].isChecked
+        }
+
         applyUpdatedCurrentGroup(updated)
+    }
+
+    func advanceToNextGroup() {
+        guard !groupedThumbnails.isEmpty else { return }
+
+        let nextIndex = currentGroupIndex + 1
+        currentGroupIndex = nextIndex < groupedThumbnails.count ? nextIndex : 0
+        currentGroup = groupedThumbnails[currentGroupIndex]
     }
 
     nonisolated private static func defaultFetchOptions() -> PHFetchOptions {
@@ -215,6 +214,9 @@ final class PhotoLibraryViewModel: ObservableObject {
         guard !group.isEmpty else { return }
         if !group.contains(where: { $0.isChecked }) {
             group[0].isChecked = true
+        }
+        for index in group.indices {
+            group[index].isInBucket = !group[index].isChecked
         }
     }
 
