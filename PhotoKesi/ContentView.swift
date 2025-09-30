@@ -168,7 +168,7 @@ private extension ContentView {
                     .padding(.vertical, metrics.buttonVerticalPadding)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.indigo)
+            .tint(Color.green.opacity(0.85))
         }
     }
 
@@ -210,7 +210,7 @@ private struct PhotoGroupBoard: View {
 
             boardSection(
                 title: "バケツ",
-                systemImage: "xmark.circle",
+                systemImage: "trash",
                 thumbnails: unchecked,
                 isUpperRow: false
             )
@@ -226,10 +226,12 @@ private struct PhotoGroupBoard: View {
                               isUpperRow: Bool) -> some View {
         VStack(alignment: .leading, spacing: metrics.rowSpacing) {
             HStack(spacing: 8) {
+                let accentColor = isUpperRow ? Color.green : Color.red
                 Image(systemName: systemImage)
-                    .foregroundStyle(isUpperRow ? Color.green : Color.secondary)
+                    .foregroundStyle(accentColor)
                 Text(title)
                     .font(.headline)
+                    .foregroundStyle(Color.primary)
             }
 
             if thumbnails.isEmpty {
@@ -237,7 +239,7 @@ private struct PhotoGroupBoard: View {
                     .fill(Color.secondary.opacity(0.08))
                     .frame(height: metrics.placeholderHeight)
                     .overlay(
-                        Text(isUpperRow ? "チェックが付いた写真はここに並びます" : "未チェックの写真はここに並びます")
+                        Text(isUpperRow ? "チェックが付いた写真はここに並びます" : "バケツの写真はここに並びます")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     )
@@ -354,16 +356,10 @@ private struct PhotoThumbnailCard: View {
                             .padding([.leading, .bottom], 16)
                     }
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    if thumbnail.isInBucket {
-                        BucketBadge()
-                            .padding([.trailing, .bottom], 16)
-                    }
-                }
-                .overlay(alignment: .topLeading) {
+                .overlay(alignment: .top) {
                     if isBest {
                         BestBadge()
-                            .padding(16)
+                            .padding(.top, 12)
                     }
                 }
                 .shadow(color: thumbnail.isChecked ? .white.opacity(0.25) : .black.opacity(0.2), radius: 12, x: 0, y: 6)
@@ -377,7 +373,7 @@ private struct PhotoThumbnailCard: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: thumbnail.isChecked)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("写真カード")
-        .accessibilityValue(thumbnail.isChecked ? "チェック済み" : (thumbnail.isInBucket ? "バケツ候補" : "未チェック"))
+        .accessibilityValue(thumbnail.isChecked ? "チェック済み" : (thumbnail.isInBucket ? "バケツ候補" : "バケツ"))
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -395,22 +391,20 @@ private struct CheckBadgeButton: View {
 
     var body: some View {
         Button(action: action) {
-            Label(isChecked ? "チェック済み" : "未チェック",
-                  systemImage: isChecked ? "checkmark.circle.fill" : "circle")
+            Image(systemName: isChecked ? "checkmark.circle.fill" : "trash.fill")
                 .font(.headline)
-                .labelStyle(.iconOnly)
                 .padding(10)
                 .background(
                     Circle()
-                        .fill(.ultraThinMaterial)
-                        .shadow(color: .black.opacity(0.2), radius: 4)
+                        .fill(isChecked ? Color.white.opacity(0.2) : Color.red.opacity(0.85))
+                        .shadow(color: .black.opacity(0.25), radius: 4)
                 )
-                .foregroundStyle(isChecked ? Color.green : Color.white.opacity(0.8))
+                .foregroundStyle(isChecked ? Color.green : Color.white)
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .opacity(isDisabled ? 0.55 : 1)
-        .accessibilityLabel(isChecked ? "未チェックにする" : "チェック済みにする")
+        .accessibilityLabel(isChecked ? "バケツに入れる" : "チェック済みにする")
     }
 }
 
@@ -426,19 +420,6 @@ private struct BestBadge: View {
             )
             .foregroundStyle(.black)
             .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
-    }
-}
-
-private struct BucketBadge: View {
-    var body: some View {
-        Image(systemName: "trash.fill")
-            .font(.caption)
-            .padding(10)
-            .background(
-                Circle()
-                    .fill(Color.red.opacity(0.75))
-            )
-            .foregroundStyle(.white)
     }
 }
 
@@ -464,17 +445,10 @@ private struct FullScreenPhotoViewer: View {
                                 .scaledToFit()
                                 .frame(width: geometry.size.width, height: geometry.size.height)
                                 .clipped()
-                                .overlay(alignment: .topLeading) {
+                                .overlay(alignment: .top) {
                                     if index == 0 {
                                         BestBadge()
                                             .padding(.top, 24)
-                                            .padding(.leading, 20)
-                                    }
-                                }
-                                .overlay(alignment: .bottomTrailing) {
-                                    if item.isInBucket {
-                                        BucketBadge()
-                                            .padding(24)
                                     }
                                 }
                         }
