@@ -9,20 +9,23 @@ import SwiftUI
 import Photos
 
 struct ContentView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var libraryViewModel = PhotoLibraryViewModel()
     @StateObject private var permissionViewModel = PhotoAuthorizationViewModel()
+
     @State private var hasLoadedInitialThumbnails = false
-    @State private var isBucketAlertPresented = false
-    @State private var bucketAlertMessage = ""
     @State private var isDeleteSheetPresented = false
+    @State private var isFullScreenPresented = false
+    @State private var viewerSelectionIndex = 0
+    private let currentModeTitle = "類似写真の整理モード"
 
     var body: some View {
         Group {
             switch permissionViewModel.status {
             case .authorized:
-                authorizedFlow(showLimitedBanner: false)
+                authorizedContent(showLimitedBanner: false)
             case .limited:
-                authorizedFlow(showLimitedBanner: true)
+                authorizedContent(showLimitedBanner: true)
             case .notDetermined:
                 AuthorizationRequestView(onRequest: permissionViewModel.requestAuthorization)
             case .denied, .restricted:
@@ -51,30 +54,23 @@ struct ContentView: View {
 }
 
 private extension ContentView {
-    @ViewBuilder
-    func authorizedFlow(showLimitedBanner: Bool) -> some View {
-        if libraryViewModel.didFinishInitialLoad {
-            authorizedContent(showLimitedBanner: showLimitedBanner)
-        } else {
-            InitialLoadingView(isLimitedAccess: showLimitedBanner,
-                               isLoading: libraryViewModel.isLoading)
-        }
-    }
-
     func authorizedContent(showLimitedBanner: Bool) -> some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
+            GeometryReader { proxy in
+                let metrics = LayoutMetrics(containerSize: proxy.size, dynamicType: dynamicTypeSize)
+
+                VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
                     if showLimitedBanner {
                         LimitedAccessBanner(onOpenSettings: permissionViewModel.openSettings)
                     }
 
-                    photoGroupSection
+                    photoGroupSection(metrics: metrics)
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(metrics.containerPadding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color(uiColor: .systemBackground))
             }
-            .navigationTitle("PhotoKesi")
+            .navigationTitle(currentModeTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -87,40 +83,45 @@ private extension ContentView {
                 }
             }
         }
-        .alert("バケツに送信", isPresented: $isBucketAlertPresented) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(bucketAlertMessage)
-        }
         .sheet(isPresented: $isDeleteSheetPresented) {
             DeleteConfirmationSheet(items: libraryViewModel.bucketItems) {
                 libraryViewModel.clearBucketAfterDeletion()
+                libraryViewModel.advanceToNextGroup()
+            }
+        }
+        .fullScreenCover(isPresented: $isFullScreenPresented) {
+            FullScreenPhotoViewer(
+                thumbnails: libraryViewModel.currentGroup,
+                selectedIndex: $viewerSelectionIndex,
+                onClose: { isFullScreenPresented = false },
+                onToggleCheck: { id in
+                    libraryViewModel.toggleCheck(for: id)
+                }
+            )
+        }
+        .onChange(of: libraryViewModel.currentGroup) { newGroup in
+            guard !newGroup.isEmpty else {
+                isFullScreenPresented = false
+                viewerSelectionIndex = 0
+                return
+            }
+            if viewerSelectionIndex >= newGroup.count {
+                viewerSelectionIndex = max(0, newGroup.count - 1)
             }
         }
     }
 
-    var photoGroupSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("最近の写真サムネイル")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Text("撮影時刻の近さでまとめた暫定グループを表示しています。チェックの切り替えやバケツ操作の流れを確認できます。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                if libraryViewModel.groupCount > 0 {
-                    Text("現在のグループ: \(libraryViewModel.currentGroupIndex + 1) / \(libraryViewModel.groupCount) ・ 時間幅 \(libraryViewModel.groupingWindowMinutes)分")
-                        .font(.footnote)
-                        .foregroundStyle(.tertiary)
-                }
+    func photoGroupSection(metrics: LayoutMetrics) -> some View {
+        VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
+            if libraryViewModel.groupCount > 0 {
+                Text("現在のグループ: \(libraryViewModel.currentGroupIndex + 1) / \(libraryViewModel.groupCount) ・ 時間幅 \(libraryViewModel.groupingWindowMinutes)分")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
             }
 
             Group {
-                if libraryViewModel.isLoading {
-                    ProgressView("写真を読み込み中...")
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 32)
+                if libraryViewModel.isLoading && !libraryViewModel.didFinishInitialLoad {
+                    PhotoBoardSkeletonView(metrics: metrics)
                 } else if libraryViewModel.currentGroup.isEmpty {
                     ContentUnavailableView(
                         "サムネイルはまだありません",
@@ -129,87 +130,207 @@ private extension ContentView {
                     )
                     .frame(maxWidth: .infinity, alignment: .center)
                 } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 16) {
-                            ForEach(libraryViewModel.currentGroup) { thumbnail in
-                                PhotoThumbnailCard(thumbnail: thumbnail) {
-                                    libraryViewModel.toggleCheck(for: thumbnail.id)
-                                }
-                            }
+                    PhotoGroupBoard(
+                        group: libraryViewModel.currentGroup,
+                        metrics: metrics,
+                        onToggleCheck: { id in
+                            libraryViewModel.toggleCheck(for: id)
+                        },
+                        onSetCheck: { id, isChecked in
+                            libraryViewModel.setCheck(isChecked, for: id)
+                        },
+                        onOpenViewer: { index in
+                            viewerSelectionIndex = index
+                            isFullScreenPresented = true
                         }
-                        .padding(.vertical, 4)
-                    }
+                    )
                 }
             }
 
             if !libraryViewModel.currentGroup.isEmpty {
-                actionButtons
+                actionButtons(metrics: metrics)
             }
         }
     }
 
-    var actionButtons: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    func actionButtons(metrics: LayoutMetrics) -> some View {
+        VStack(alignment: .leading, spacing: metrics.buttonSpacing) {
             Button {
-                handleBucketAction()
+                if libraryViewModel.bucketItems.isEmpty {
+                    libraryViewModel.advanceToNextGroup()
+                } else {
+                    isDeleteSheetPresented = true
+                }
             } label: {
-                Text("チェック以外をバケツへ")
+                Label("仕分けを完了して次のグループへ", systemImage: "trash.slash")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
+                    .padding(.vertical, metrics.buttonVerticalPadding)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.indigo)
-
-            Button {
-                isDeleteSheetPresented = true
-            } label: {
-                Text("バケツを空にする（削除確認）")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-            }
-            .buttonStyle(.bordered)
-            .tint(.red)
-            .disabled(libraryViewModel.bucketItems.isEmpty)
+            .tint(Color.green.opacity(0.85))
         }
     }
 
-    func handleBucketAction() {
-        let result = libraryViewModel.sendUncheckedToBucket()
-        bucketAlertMessage = alertMessage(for: result)
-        isBucketAlertPresented = true
+}
+
+private struct PhotoGroupBoard: View {
+    let group: [PhotoLibraryViewModel.AssetThumbnail]
+    let metrics: LayoutMetrics
+    let onToggleCheck: (String) -> Void
+    let onSetCheck: (String, Bool) -> Void
+    let onOpenViewer: (Int) -> Void
+
+    private struct IndexedThumbnail: Identifiable {
+        let index: Int
+        let thumbnail: PhotoLibraryViewModel.AssetThumbnail
+        var id: String { thumbnail.id }
     }
 
-    private func alertMessage(for result: PhotoLibraryViewModel.BucketActionResult) -> String {
-        switch (result.totalItems, result.newlyAdded) {
-        case (0, _):
-            return "未チェックの写真がないため、バケツは空のままです。"
-        case (_, 0):
-            return "バケツに新しく追加される写真はありませんでした（計\(result.totalItems)枚）。"
-        default:
-            return "未チェックの写真\(result.newlyAdded)枚をバケツに入れました（計\(result.totalItems)枚）。"
+    private var checked: [IndexedThumbnail] {
+        group.enumerated().compactMap { index, item in
+            item.isChecked ? IndexedThumbnail(index: index, thumbnail: item) : nil
+        }
+    }
+
+    private var unchecked: [IndexedThumbnail] {
+        group.enumerated().compactMap { index, item in
+            item.isChecked ? nil : IndexedThumbnail(index: index, thumbnail: item)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: metrics.boardSpacing) {
+            boardSection(
+                title: "残す写真",
+                systemImage: "checkmark.circle.fill",
+                thumbnails: checked,
+                isUpperRow: true
+            )
+
+            boardSection(
+                title: "バケツ",
+                systemImage: "trash",
+                thumbnails: unchecked,
+                isUpperRow: false
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.easeInOut(duration: 0.18), value: group)
+    }
+
+    @ViewBuilder
+    private func boardSection(title: String,
+                              systemImage: String,
+                              thumbnails: [IndexedThumbnail],
+                              isUpperRow: Bool) -> some View {
+        VStack(alignment: .leading, spacing: metrics.rowSpacing) {
+            HStack(spacing: 8) {
+                let accentColor = isUpperRow ? Color.green : Color.red
+                Image(systemName: systemImage)
+                    .foregroundStyle(accentColor)
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(Color.primary)
+            }
+
+            if thumbnails.isEmpty {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.secondary.opacity(0.08))
+                    .frame(height: metrics.placeholderHeight)
+                    .overlay(
+                        Text(isUpperRow ? "チェックが付いた写真はここに並びます" : "バケツの写真はここに並びます")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    )
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: metrics.thumbnailSpacing) {
+                        ForEach(thumbnails) { item in
+                            PhotoThumbnailCard(
+                                thumbnail: item.thumbnail,
+                                isBest: item.index == 0,
+                                cardSize: metrics.cardSize,
+                                onOpenViewer: { onOpenViewer(item.index) },
+                                onToggleCheck: { onToggleCheck(item.thumbnail.id) },
+                                onSwipeUp: {
+                                    onSetCheck(item.thumbnail.id, true)
+                                },
+                                onSwipeDown: {
+                                    onSetCheck(item.thumbnail.id, false)
+                                },
+                                isToggleDisabled: false,
+                                allowSwipeUp: !isUpperRow,
+                                allowSwipeDown: isUpperRow
+                            )
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+}
+
+private struct PhotoBoardSkeletonView: View {
+    let metrics: LayoutMetrics
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: metrics.boardSpacing) {
+            skeletonRow(title: "残す写真")
+            skeletonRow(title: "バケツ")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .redacted(reason: .placeholder)
+    }
+
+    @ViewBuilder
+    private func skeletonRow(title: String) -> some View {
+        VStack(alignment: .leading, spacing: metrics.rowSpacing) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.stack.fill")
+                Text(title)
+                    .font(.headline)
+            }
+            LazyHStack(spacing: metrics.thumbnailSpacing) {
+                ForEach(0..<3, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(width: metrics.cardSize.width, height: metrics.cardSize.height)
+                }
+            }
+            .padding(.vertical, 4)
         }
     }
 }
 
 private struct PhotoThumbnailCard: View {
     let thumbnail: PhotoLibraryViewModel.AssetThumbnail
-    let onToggle: () -> Void
-
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter
-    }()
+    let isBest: Bool
+    let cardSize: CGSize
+    let onOpenViewer: () -> Void
+    let onToggleCheck: () -> Void
+    let onSwipeUp: () -> Void
+    let onSwipeDown: () -> Void
+    let isToggleDisabled: Bool
+    let allowSwipeUp: Bool
+    let allowSwipeDown: Bool
 
     var body: some View {
+        let dragGesture = DragGesture(minimumDistance: 30)
+            .onEnded { value in
+                if value.translation.height < -60, allowSwipeUp {
+                    onSwipeUp()
+                } else if value.translation.height > 60, allowSwipeDown {
+                    onSwipeDown()
+                }
+            }
+
         ZStack(alignment: .topTrailing) {
             Image(uiImage: thumbnail.image)
                 .resizable()
                 .scaledToFill()
-                .frame(width: 200, height: 260)
+                .frame(width: cardSize.width, height: cardSize.height)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .overlay(
@@ -221,73 +342,167 @@ private struct PhotoThumbnailCard: View {
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 )
                 .overlay(alignment: .bottomLeading) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let creationDate = thumbnail.asset.creationDate {
-                            Text(Self.dateFormatter.string(from: creationDate))
-                                .font(.footnote)
-                                .fontWeight(.medium)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(
-                                    Capsule()
-                                        .fill(Color.white.opacity(0.25))
-                                )
-                        }
+                    if let creationDate = thumbnail.asset.creationDate {
+                        Text(PhotoThumbnailCard.dateFormatter.string(from: creationDate))
+                            .font(.footnote)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule()
+                                    .fill(Color.white.opacity(0.25))
+                            )
+                            .padding([.leading, .bottom], 16)
                     }
-                    .padding([.leading, .bottom], 16)
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    if thumbnail.isInBucket {
-                        BucketBadge()
-                            .padding([.trailing, .bottom], 16)
+                .overlay(alignment: .top) {
+                    if isBest {
+                        BestBadge()
+                            .padding(.top, 12)
                     }
                 }
                 .shadow(color: thumbnail.isChecked ? .white.opacity(0.25) : .black.opacity(0.2), radius: 12, x: 0, y: 6)
 
-            CheckBadge(isChecked: thumbnail.isChecked)
+            CheckBadgeButton(isChecked: thumbnail.isChecked, isDisabled: isToggleDisabled, action: onToggleCheck)
                 .padding(16)
         }
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onTapGesture {
-            onToggle()
-        }
+        .onTapGesture(perform: onOpenViewer)
+        .gesture(dragGesture)
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: thumbnail.isChecked)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("写真カード")
-        .accessibilityValue(thumbnail.isChecked ? "チェック済み" : (thumbnail.isInBucket ? "バケツ候補" : "未チェック"))
+        .accessibilityValue(thumbnail.isChecked ? "チェック済み" : (thumbnail.isInBucket ? "バケツ候補" : "バケツ"))
     }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }
 
-private struct CheckBadge: View {
+private struct CheckBadgeButton: View {
     let isChecked: Bool
+    let isDisabled: Bool
+    let action: () -> Void
 
     var body: some View {
-        Label(isChecked ? "チェック済み" : "未チェック", systemImage: isChecked ? "checkmark.circle.fill" : "circle")
-            .font(.headline)
-            .labelStyle(.iconOnly)
-            .padding(10)
-            .background(
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.2), radius: 4)
-            )
-            .foregroundStyle(isChecked ? Color.green : Color.white.opacity(0.8))
+        Button(action: action) {
+            Image(systemName: isChecked ? "checkmark.circle.fill" : "trash.fill")
+                .font(.headline)
+                .padding(10)
+                .background(
+                    Circle()
+                        .fill(isChecked ? Color.white.opacity(0.2) : Color.red.opacity(0.85))
+                        .shadow(color: .black.opacity(0.25), radius: 4)
+                )
+                .foregroundStyle(isChecked ? Color.green : Color.white)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.55 : 1)
+        .accessibilityLabel(isChecked ? "バケツに入れる" : "チェック済みにする")
     }
 }
 
-private struct BucketBadge: View {
+private struct BestBadge: View {
     var body: some View {
-        Text("バケツ候補")
-            .font(.caption)
-            .fontWeight(.semibold)
-            .foregroundStyle(.white)
+        Text("best✨")
+            .font(.caption.weight(.semibold))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(
                 Capsule()
-                    .fill(Color.red.opacity(0.65))
+                    .fill(Color.yellow.opacity(0.85))
             )
+            .foregroundStyle(.black)
+            .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
+    }
+}
+
+private struct FullScreenPhotoViewer: View {
+    let thumbnails: [PhotoLibraryViewModel.AssetThumbnail]
+    @Binding var selectedIndex: Int
+    let onClose: () -> Void
+    let onToggleCheck: (String) -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if thumbnails.isEmpty {
+                ProgressView()
+                    .tint(.white)
+            } else {
+                TabView(selection: $selectedIndex) {
+                    ForEach(Array(thumbnails.enumerated()), id: \.0) { index, item in
+                        GeometryReader { geometry in
+                            Image(uiImage: item.image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .clipped()
+                                .overlay(alignment: .top) {
+                                    if index == 0 {
+                                        BestBadge()
+                                            .padding(.top, 24)
+                                    }
+                                }
+                        }
+                        .tag(index)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+            }
+
+            VStack {
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "chevron.left")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(12)
+                            .background(
+                                Circle()
+                                    .fill(Color.white.opacity(0.08))
+                            )
+                    }
+                    .accessibilityLabel("一覧に戻る")
+
+                    Spacer()
+
+                    if let current = thumbnails[safe: selectedIndex] {
+                        CheckBadgeButton(
+                            isChecked: current.isChecked,
+                            isDisabled: false,
+                            action: {
+                                onToggleCheck(current.id)
+                            }
+                        )
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 32)
+
+                Spacer()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 40)
+                .onEnded { value in
+                    if abs(value.translation.width) < 80 && value.translation.height < -90 {
+                        onClose()
+                    }
+                }
+        )
+        .onChange(of: thumbnails) { newValue in
+            if selectedIndex >= newValue.count {
+                selectedIndex = max(0, newValue.count - 1)
+            }
+        }
     }
 }
 
@@ -348,12 +563,13 @@ private struct DeleteConfirmationSheet: View {
                     onConfirmDeletion()
                     dismiss()
                 } label: {
-                    Text("チェックの無い画像を削除（ダミー）")
+                    Label("削除確定", systemImage: "trash.fill")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.red)
                 .padding()
                 .disabled(items.isEmpty)
             }
@@ -361,43 +577,61 @@ private struct DeleteConfirmationSheet: View {
     }
 }
 
-private struct InitialLoadingView: View {
-    let isLimitedAccess: Bool
-    let isLoading: Bool
 
-    var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
+private struct LayoutMetrics {
+    let cardSize: CGSize
+    let sectionSpacing: CGFloat
+    let boardSpacing: CGFloat
+    let rowSpacing: CGFloat
+    let thumbnailSpacing: CGFloat
+    let containerPadding: EdgeInsets
+    let buttonVerticalPadding: CGFloat
+    let buttonSpacing: CGFloat
+    let placeholderHeight: CGFloat
 
-            ProgressView()
-                .progressViewStyle(.circular)
-                .tint(.indigo)
-                .scaleEffect(1.4)
+    init(containerSize: CGSize, dynamicType: DynamicTypeSize) {
+        let horizontalPadding: CGFloat = containerSize.width <= 360 ? 16 : 24
+        containerPadding = EdgeInsets(top: 24, leading: horizontalPadding, bottom: 24, trailing: horizontalPadding)
 
-            VStack(spacing: 12) {
-                Text("写真ライブラリを準備中です")
-                    .font(.title3)
-                    .fontWeight(.semibold)
+        let isAccessibility = dynamicType.isAccessibilitySize
 
-                Text(isLimitedAccess ? "選択された写真の読み込みとサムネイル生成を開始しています。完了するとメイン画面に切り替わります。" : "端末内の最近の写真を読み込み、サムネイル生成とキャッシュの準備を進めています。完了するとメイン画面に切り替わります。")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
+        sectionSpacing = isAccessibility ? 18 : 20
+        boardSpacing = isAccessibility ? 14 : 18
+        rowSpacing = isAccessibility ? 10 : 12
+        thumbnailSpacing = isAccessibility ? 12 : 16
+        buttonVerticalPadding = isAccessibility ? 12 : 14
+        buttonSpacing = isAccessibility ? 10 : 12
 
-            if !isLoading {
-                Text("まもなく表示されます…")
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
-            }
+        let availableWidth = max(160, containerSize.width - horizontalPadding * 2)
+        var cardWidth = min(220, availableWidth * 0.55)
+        cardWidth = max(140, cardWidth)
 
-            Spacer()
+        var cardHeight = cardWidth * 1.08
+        let maxHeight = max(150, containerSize.height * 0.36)
+        cardHeight = min(cardHeight, maxHeight)
+        cardHeight = max(140, cardHeight)
+
+        if isAccessibility {
+            cardWidth = max(140, min(cardWidth, availableWidth * 0.5))
+            cardHeight = max(150, min(cardHeight, containerSize.height * 0.34))
         }
-        .padding(32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+
+        cardSize = CGSize(width: cardWidth, height: cardHeight)
+        placeholderHeight = cardHeight + 12
     }
 }
+
+private extension DynamicTypeSize {
+    var isAccessibilitySize: Bool {
+        switch self {
+        case .accessibility1, .accessibility2, .accessibility3, .accessibility4, .accessibility5:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 
 private struct AuthorizationRequestView: View {
     let onRequest: () -> Void
@@ -511,6 +745,12 @@ private struct LimitedAccessBanner: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Color.indigo.opacity(0.35))
         )
+    }
+}
+
+private extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
