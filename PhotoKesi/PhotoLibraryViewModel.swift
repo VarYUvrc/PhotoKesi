@@ -8,13 +8,19 @@ final class PhotoLibraryViewModel: ObservableObject {
     struct AssetThumbnail: Identifiable, Equatable {
         let asset: PHAsset
         let image: UIImage
+        let signature: PhotoSimilaritySignature
         var isChecked: Bool = false
         var isInBucket: Bool = false
+        var isBest: Bool = false
 
         var id: String { asset.localIdentifier }
+        var sharpnessScore: Double { signature.sharpnessScore }
 
         static func == (lhs: AssetThumbnail, rhs: AssetThumbnail) -> Bool {
-            lhs.id == rhs.id && lhs.isChecked == rhs.isChecked && lhs.isInBucket == rhs.isInBucket
+            lhs.id == rhs.id
+            && lhs.isChecked == rhs.isChecked
+            && lhs.isInBucket == rhs.isInBucket
+            && lhs.isBest == rhs.isBest
         }
     }
 
@@ -46,6 +52,8 @@ final class PhotoLibraryViewModel: ObservableObject {
 
     static let minGroupingMinutes = 15
     static let maxGroupingMinutes = 240
+    private static let perceptualHashThreshold = 12
+    private static let differenceHashThreshold = 18
 
     private let thumbnailCache: PhotoThumbnailCache
     private let fetchOptions: PHFetchOptions
@@ -85,7 +93,10 @@ final class PhotoLibraryViewModel: ObservableObject {
 
             switch result {
             case .success(let image):
-                let thumbnail = AssetThumbnail(asset: asset, image: image)
+                guard let signature = PhotoSimilarityAnalyzer.makeSignature(from: image) else {
+                    continue
+                }
+                let thumbnail = AssetThumbnail(asset: asset, image: image, signature: signature)
                 newThumbnails.append(thumbnail)
             case .failure:
                 continue
@@ -149,14 +160,7 @@ final class PhotoLibraryViewModel: ObservableObject {
             updated[index].isChecked = false
         }
 
-        if !updated.isEmpty, !updated.contains(where: { $0.isChecked }) {
-            updated[0].isChecked = true
-        }
-
-        for index in updated.indices {
-            updated[index].isInBucket = !updated[index].isChecked
-        }
-
+        ensureDefaultCheck(in: &updated, enforceChecked: true)
         applyUpdatedCurrentGroup(updated)
     }
 
@@ -192,7 +196,7 @@ final class PhotoLibraryViewModel: ObservableObject {
         var grouped = groupThumbnails(rawThumbnails)
 
         for index in grouped.indices {
-            ensureDefaultCheck(in: &grouped[index])
+            ensureDefaultCheck(in: &grouped[index], enforceChecked: true)
         }
 
         groupedThumbnails = grouped
@@ -210,24 +214,42 @@ final class PhotoLibraryViewModel: ObservableObject {
         currentGroup = groupedThumbnails[currentGroupIndex]
     }
 
-    private func ensureDefaultCheck(in group: inout [AssetThumbnail]) {
+    private func ensureDefaultCheck(in group: inout [AssetThumbnail], enforceChecked: Bool) {
         guard !group.isEmpty else { return }
-        if !group.contains(where: { $0.isChecked }) {
-            group[0].isChecked = true
+
+        if !group.contains(where: { $0.isBest }) {
+            markBest(in: &group)
+        } else {
+            let bestIndices = group.indices.filter { group[$0].isBest }
+            if bestIndices.count != 1 {
+                markBest(in: &group)
+            }
         }
+
+        if enforceChecked && !group.contains(where: { $0.isChecked }) {
+            if let bestIndex = group.firstIndex(where: { $0.isBest }) {
+                group[bestIndex].isChecked = true
+            } else {
+                group[0].isChecked = true
+            }
+        }
+
         for index in group.indices {
             group[index].isInBucket = !group[index].isChecked
         }
     }
 
     private func applyUpdatedCurrentGroup(_ updatedGroup: [AssetThumbnail]) {
+        var normalizedGroup = updatedGroup
+        ensureDefaultCheck(in: &normalizedGroup, enforceChecked: false)
+
         if groupedThumbnails.indices.contains(currentGroupIndex) {
-            groupedThumbnails[currentGroupIndex] = updatedGroup
+            groupedThumbnails[currentGroupIndex] = normalizedGroup
         }
 
-        currentGroup = updatedGroup
+        currentGroup = normalizedGroup
 
-        for item in updatedGroup {
+        for item in normalizedGroup {
             if let rawIndex = rawThumbnails.firstIndex(where: { $0.id == item.id }) {
                 rawThumbnails[rawIndex] = item
             }
@@ -238,41 +260,85 @@ final class PhotoLibraryViewModel: ObservableObject {
         guard !thumbnails.isEmpty else { return [] }
 
         let window = TimeInterval(groupingWindowMinutes * 60)
-        var groups: [[AssetThumbnail]] = []
-        var current: [AssetThumbnail] = []
-        var lastDate: Date?
-
-        for thumbnail in thumbnails {
-            guard let creationDate = thumbnail.asset.creationDate else {
-                if current.count > 1 {
-                    groups.append(current)
-                }
-                current = []
-                lastDate = nil
-                continue
-            }
-
-            if let last = lastDate {
-                let delta = abs(last.timeIntervalSince(creationDate))
-                if delta <= window {
-                    current.append(thumbnail)
-                } else {
-                    if current.count > 1 {
-                        groups.append(current)
-                    }
-                    current = [thumbnail]
-                }
-            } else {
-                current = [thumbnail]
-            }
-
-            lastDate = creationDate
+        let sorted = thumbnails.sorted { lhs, rhs in
+            let lhsDate = lhs.asset.creationDate ?? .distantPast
+            let rhsDate = rhs.asset.creationDate ?? .distantPast
+            return lhsDate > rhsDate
         }
 
-        if current.count > 1 {
-            groups.append(current)
+        var groups: [[AssetThumbnail]] = []
+        var usedIdentifiers = Set<String>()
+
+        for anchor in sorted {
+            guard !usedIdentifiers.contains(anchor.id),
+                  anchor.asset.creationDate != nil else { continue }
+
+            var group: [AssetThumbnail] = [anchor]
+            usedIdentifiers.insert(anchor.id)
+
+            for candidate in sorted {
+                guard !usedIdentifiers.contains(candidate.id) else { continue }
+
+                if candidateBelongs(candidate, to: group, window: window) {
+                    group.append(candidate)
+                    usedIdentifiers.insert(candidate.id)
+                }
+            }
+
+            if group.count > 1 {
+                group.sort { lhs, rhs in
+                    let lhsDate = lhs.asset.creationDate ?? .distantPast
+                    let rhsDate = rhs.asset.creationDate ?? .distantPast
+                    return lhsDate > rhsDate
+                }
+                groups.append(group)
+            }
+        }
+
+        groups.sort { lhs, rhs in
+            let lhsDate = lhs.first?.asset.creationDate ?? .distantPast
+            let rhsDate = rhs.first?.asset.creationDate ?? .distantPast
+            return lhsDate > rhsDate
         }
 
         return groups
+    }
+
+    private func candidateBelongs(_ candidate: AssetThumbnail,
+                                  to group: [AssetThumbnail],
+                                  window: TimeInterval) -> Bool {
+        guard let candidateDate = candidate.asset.creationDate else { return false }
+
+        return group.contains { member in
+            guard let memberDate = member.asset.creationDate else { return false }
+            let timeDelta = abs(memberDate.timeIntervalSince(candidateDate))
+            guard timeDelta <= window else { return false }
+
+            let perceptualDistance = PhotoLibraryViewModel.hammingDistance(
+                member.signature.perceptualHash,
+                candidate.signature.perceptualHash
+            )
+            guard perceptualDistance <= PhotoLibraryViewModel.perceptualHashThreshold else { return false }
+
+            let differenceDistance = PhotoLibraryViewModel.hammingDistance(
+                member.signature.differenceHash,
+                candidate.signature.differenceHash
+            )
+            return differenceDistance <= PhotoLibraryViewModel.differenceHashThreshold
+        }
+    }
+
+    private func markBest(in group: inout [AssetThumbnail]) {
+        guard let bestIndex = group.enumerated().max(by: { $0.element.sharpnessScore < $1.element.sharpnessScore })?.offset else {
+            return
+        }
+
+        for index in group.indices {
+            group[index].isBest = index == bestIndex
+        }
+    }
+
+    private static func hammingDistance(_ lhs: UInt64, _ rhs: UInt64) -> Int {
+        (lhs ^ rhs).nonzeroBitCount
     }
 }

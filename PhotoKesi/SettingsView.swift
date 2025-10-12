@@ -9,6 +9,16 @@ struct SettingsView: View {
     private let maxMinutes = PhotoLibraryViewModel.maxGroupingMinutes
 
     var body: some View {
+        let swipeGesture = DragGesture(minimumDistance: 60)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+                guard abs(horizontal) > abs(vertical) else { return }
+                if horizontal < -80 {
+                    dismiss()
+                }
+            }
+
         Form {
             Section("グルーピングの設定") {
                 VStack(alignment: .leading, spacing: 12) {
@@ -27,13 +37,7 @@ struct SettingsView: View {
         }
         .navigationTitle("設定")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("閉じる") {
-                    dismiss()
-                }
-            }
-        }
+        .simultaneousGesture(swipeGesture)
     }
 
     private func bindingForGroupingWindow() -> Binding<Int> {

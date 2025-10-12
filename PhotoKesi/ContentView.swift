@@ -249,7 +249,7 @@ private struct PhotoGroupBoard: View {
                         ForEach(thumbnails) { item in
                             PhotoThumbnailCard(
                                 thumbnail: item.thumbnail,
-                                isBest: item.index == 0,
+                                isBest: item.thumbnail.isBest,
                                 cardSize: metrics.cardSize,
                                 onOpenViewer: { onOpenViewer(item.index) },
                                 onToggleCheck: { onToggleCheck(item.thumbnail.id) },
@@ -429,6 +429,9 @@ private struct FullScreenPhotoViewer: View {
     let onClose: () -> Void
     let onToggleCheck: (String) -> Void
 
+    @State private var highResolutionImages: [String: UIImage] = [:]
+    @State private var loadingIdentifiers: Set<String> = []
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -440,15 +443,23 @@ private struct FullScreenPhotoViewer: View {
                 TabView(selection: $selectedIndex) {
                     ForEach(Array(thumbnails.enumerated()), id: \.0) { index, item in
                         GeometryReader { geometry in
-                            Image(uiImage: item.image)
+                            let displayImage = highResolutionImages[item.id] ?? item.image
+
+                            Image(uiImage: displayImage)
                                 .resizable()
                                 .scaledToFit()
                                 .frame(width: geometry.size.width, height: geometry.size.height)
                                 .clipped()
                                 .overlay(alignment: .top) {
-                                    if index == 0 {
+                                    if item.isBest {
                                         BestBadge()
                                             .padding(.top, 24)
+                                    }
+                                }
+                                .overlay {
+                                    if loadingIdentifiers.contains(item.id) && highResolutionImages[item.id] == nil {
+                                        ProgressView()
+                                            .tint(.white)
                                     }
                                 }
                         }
@@ -493,7 +504,10 @@ private struct FullScreenPhotoViewer: View {
         .gesture(
             DragGesture(minimumDistance: 40)
                 .onEnded { value in
-                    if abs(value.translation.width) < 80 && value.translation.height < -90 {
+                    let horizontal = value.translation.width
+                    let vertical = value.translation.height
+                    guard abs(vertical) > abs(horizontal) else { return }
+                    if vertical > 90 {
                         onClose()
                     }
                 }
@@ -502,6 +516,61 @@ private struct FullScreenPhotoViewer: View {
             if selectedIndex >= newValue.count {
                 selectedIndex = max(0, newValue.count - 1)
             }
+            prefetchHighResolutionImages(around: selectedIndex)
+        }
+        .onAppear {
+            prefetchHighResolutionImages(around: selectedIndex)
+        }
+        .onChange(of: selectedIndex) { newValue in
+            prefetchHighResolutionImages(around: newValue)
+        }
+    }
+
+    @MainActor
+    private func loadHighResolutionImage(for thumbnail: PhotoLibraryViewModel.AssetThumbnail) {
+        if highResolutionImages[thumbnail.id] != nil || loadingIdentifiers.contains(thumbnail.id) {
+            return
+        }
+
+        loadingIdentifiers.insert(thumbnail.id)
+
+        Task {
+            let scale = UIScreen.main.scale
+            let screenSize = UIScreen.main.bounds.size
+            let targetSize = CGSize(width: screenSize.width * scale, height: screenSize.height * scale)
+            let result = await PhotoFullImageLoader.shared.image(for: thumbnail.asset,
+                                                                 targetSize: targetSize,
+                                                                 contentMode: .aspectFit)
+
+            await MainActor.run {
+                loadingIdentifiers.remove(thumbnail.id)
+                if case let .success(image) = result {
+                    highResolutionImages[thumbnail.id] = image
+                    pruneCacheIfNeeded()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func prefetchHighResolutionImages(around index: Int) {
+        guard !thumbnails.isEmpty else { return }
+        let nearby = [index - 1, index, index + 1]
+
+        for position in nearby {
+            guard thumbnails.indices.contains(position) else { continue }
+            let thumbnail = thumbnails[position]
+            loadHighResolutionImage(for: thumbnail)
+        }
+    }
+
+    @MainActor
+    private func pruneCacheIfNeeded() {
+        let allowedIndices = Set((selectedIndex-2...selectedIndex+2).filter { thumbnails.indices.contains($0) })
+        let allowedIDs: Set<String> = Set(allowedIndices.map { thumbnails[$0].id })
+
+        for key in highResolutionImages.keys where !allowedIDs.contains(key) {
+            highResolutionImages.removeValue(forKey: key)
         }
     }
 }
