@@ -24,6 +24,19 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
     }
 
+    struct BucketGroup: Identifiable {
+        let groupIndex: Int
+        let items: [AssetThumbnail]
+
+        var id: Int { groupIndex }
+        var displayIndex: Int { groupIndex + 1 }
+    }
+
+    private struct GroupState {
+        var thumbnails: [AssetThumbnail]
+        var isProcessed: Bool
+    }
+
     @Published private(set) var currentGroup: [AssetThumbnail] = []
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var currentGroupIndex: Int = 0
@@ -42,8 +55,21 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
     }
 
+    var bucketItemGroups: [BucketGroup] {
+        groupedThumbnails.enumerated().compactMap { index, state in
+            guard state.isProcessed else { return nil }
+            let items = state.thumbnails.filter { $0.isInBucket }
+            guard !items.isEmpty else { return nil }
+            return BucketGroup(groupIndex: index, items: items)
+        }
+    }
+
     var bucketItems: [AssetThumbnail] {
-        currentGroup.filter { $0.isInBucket }
+        bucketItemGroups.flatMap { $0.items }
+    }
+
+    var hasBucketItems: Bool {
+        !bucketItemGroups.isEmpty
     }
 
     var groupCount: Int {
@@ -58,7 +84,7 @@ final class PhotoLibraryViewModel: ObservableObject {
     private let thumbnailCache: PhotoThumbnailCache
     private let fetchOptions: PHFetchOptions
 
-    private var groupedThumbnails: [[AssetThumbnail]] = []
+    private var groupedThumbnails: [GroupState] = []
     private var rawThumbnails: [AssetThumbnail] = []
 
     init(thumbnailCache: PhotoThumbnailCache = .shared,
@@ -151,25 +177,87 @@ final class PhotoLibraryViewModel: ObservableObject {
     }
 
     func clearBucketAfterDeletion() {
-        guard !currentGroup.isEmpty else { return }
+        let groups = bucketItemGroups
+        guard !groups.isEmpty else { return }
 
-        var updated = currentGroup
+        let identifiersToRemove = Set(groups.flatMap { $0.items.map(\.id) })
+        guard !identifiersToRemove.isEmpty else { return }
 
-        for index in updated.indices where updated[index].isInBucket {
-            updated[index].isInBucket = false
-            updated[index].isChecked = false
+        rawThumbnails.removeAll { identifiersToRemove.contains($0.id) }
+
+        for index in groupedThumbnails.indices {
+            var state = groupedThumbnails[index]
+            state.thumbnails.removeAll { identifiersToRemove.contains($0.id) }
+            if state.thumbnails.isEmpty {
+                state.isProcessed = false
+            } else {
+                ensureDefaultCheck(in: &state.thumbnails,
+                                   enforceChecked: false,
+                                   markBucketForDeletion: state.isProcessed)
+            }
+            groupedThumbnails[index] = state
         }
 
-        ensureDefaultCheck(in: &updated, enforceChecked: true)
-        applyUpdatedCurrentGroup(updated)
+        groupedThumbnails.removeAll { $0.thumbnails.isEmpty }
+
+        guard !groupedThumbnails.isEmpty else {
+            currentGroup = []
+            currentGroupIndex = 0
+            return
+        }
+
+        if currentGroupIndex >= groupedThumbnails.count {
+            currentGroupIndex = max(0, groupedThumbnails.count - 1)
+        }
+
+        currentGroup = groupedThumbnails[currentGroupIndex].thumbnails
     }
 
     func advanceToNextGroup() {
         guard !groupedThumbnails.isEmpty else { return }
+        finalizeCurrentGroup()
+        guard !groupedThumbnails.isEmpty else { return }
 
-        let nextIndex = currentGroupIndex + 1
-        currentGroupIndex = nextIndex < groupedThumbnails.count ? nextIndex : 0
-        currentGroup = groupedThumbnails[currentGroupIndex]
+        let nextIndex = groupedThumbnails.isEmpty ? 0 : (currentGroupIndex + 1) % groupedThumbnails.count
+        currentGroupIndex = nextIndex
+        presentGroup(at: currentGroupIndex)
+    }
+
+    private func presentGroup(at index: Int) {
+        guard groupedThumbnails.indices.contains(index) else {
+            currentGroup = []
+            return
+        }
+
+        var state = groupedThumbnails[index]
+
+        if !state.isProcessed {
+            ensureDefaultCheck(in: &state.thumbnails,
+                               enforceChecked: false,
+                               markBucketForDeletion: false)
+        } else {
+            ensureDefaultCheck(in: &state.thumbnails,
+                               enforceChecked: false,
+                               markBucketForDeletion: true)
+        }
+
+        groupedThumbnails[index] = state
+        currentGroup = state.thumbnails
+    }
+
+    private func finalizeCurrentGroup() {
+        guard groupedThumbnails.indices.contains(currentGroupIndex) else { return }
+
+        var state = groupedThumbnails[currentGroupIndex]
+        guard !state.thumbnails.isEmpty else { return }
+
+        state.thumbnails = currentGroup
+        ensureDefaultCheck(in: &state.thumbnails,
+                           enforceChecked: false,
+                           markBucketForDeletion: true)
+        state.isProcessed = true
+        groupedThumbnails[currentGroupIndex] = state
+        currentGroup = state.thumbnails
     }
 
     nonisolated private static func defaultFetchOptions() -> PHFetchOptions {
@@ -193,13 +281,14 @@ final class PhotoLibraryViewModel: ObservableObject {
             return
         }
 
-        var grouped = groupThumbnails(rawThumbnails)
-
-        for index in grouped.indices {
-            ensureDefaultCheck(in: &grouped[index], enforceChecked: true)
+        let grouped = groupThumbnails(rawThumbnails)
+        groupedThumbnails = grouped.map { group in
+            var thumbnails = group
+            ensureDefaultCheck(in: &thumbnails,
+                               enforceChecked: true,
+                               markBucketForDeletion: false)
+            return GroupState(thumbnails: thumbnails, isProcessed: false)
         }
-
-        groupedThumbnails = grouped
 
         if groupedThumbnails.isEmpty {
             currentGroup = []
@@ -211,10 +300,12 @@ final class PhotoLibraryViewModel: ObservableObject {
             currentGroupIndex = 0
         }
 
-        currentGroup = groupedThumbnails[currentGroupIndex]
+        presentGroup(at: currentGroupIndex)
     }
 
-    private func ensureDefaultCheck(in group: inout [AssetThumbnail], enforceChecked: Bool) {
+    private func ensureDefaultCheck(in group: inout [AssetThumbnail],
+                                    enforceChecked: Bool,
+                                    markBucketForDeletion: Bool) {
         guard !group.isEmpty else { return }
 
         if !group.contains(where: { $0.isBest }) {
@@ -235,16 +326,20 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
 
         for index in group.indices {
-            group[index].isInBucket = !group[index].isChecked
+            if markBucketForDeletion {
+                group[index].isInBucket = !group[index].isChecked
+            }
         }
     }
 
     private func applyUpdatedCurrentGroup(_ updatedGroup: [AssetThumbnail]) {
         var normalizedGroup = updatedGroup
-        ensureDefaultCheck(in: &normalizedGroup, enforceChecked: false)
+        ensureDefaultCheck(in: &normalizedGroup,
+                           enforceChecked: false,
+                           markBucketForDeletion: false)
 
         if groupedThumbnails.indices.contains(currentGroupIndex) {
-            groupedThumbnails[currentGroupIndex] = normalizedGroup
+            groupedThumbnails[currentGroupIndex].thumbnails = normalizedGroup
         }
 
         currentGroup = normalizedGroup

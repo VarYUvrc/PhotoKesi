@@ -84,9 +84,8 @@ private extension ContentView {
             }
         }
         .sheet(isPresented: $isDeleteSheetPresented) {
-            DeleteConfirmationSheet(items: libraryViewModel.bucketItems) {
+            DeleteConfirmationSheet(groups: libraryViewModel.bucketItemGroups) {
                 libraryViewModel.clearBucketAfterDeletion()
-                libraryViewModel.advanceToNextGroup()
             }
         }
         .fullScreenCover(isPresented: $isFullScreenPresented) {
@@ -156,11 +155,7 @@ private extension ContentView {
     func actionButtons(metrics: LayoutMetrics) -> some View {
         VStack(alignment: .leading, spacing: metrics.buttonSpacing) {
             Button {
-                if libraryViewModel.bucketItems.isEmpty {
-                    libraryViewModel.advanceToNextGroup()
-                } else {
-                    isDeleteSheetPresented = true
-                }
+                libraryViewModel.advanceToNextGroup()
             } label: {
                 Label("仕分けを完了して次のグループへ", systemImage: "trash.slash")
                     .font(.headline)
@@ -169,6 +164,19 @@ private extension ContentView {
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.green.opacity(0.85))
+
+            Button {
+                isDeleteSheetPresented = true
+            } label: {
+                Label("バケツを空にする", systemImage: "trash.fill")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, metrics.buttonVerticalPadding)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .disabled(!libraryViewModel.hasBucketItems)
+            .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
         }
     }
 
@@ -576,49 +584,68 @@ private struct FullScreenPhotoViewer: View {
 }
 
 private struct DeleteConfirmationSheet: View {
-    let items: [PhotoLibraryViewModel.AssetThumbnail]
+    let groups: [PhotoLibraryViewModel.BucketGroup]
     let onConfirmDeletion: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
         formatter.timeStyle = .short
         return formatter
     }()
 
+    private static let detailFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let intervalFormatter: DateIntervalFormatter = {
+        let formatter = DateIntervalFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private var totalCount: Int {
+        groups.reduce(into: 0) { partialResult, group in
+            partialResult += group.items.count
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            List {
-                Section("削除候補（ダミー）") {
-                    if items.isEmpty {
-                        Label("削除候補はありません", systemImage: "checkmark.circle")
-                            .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if totalCount > 0 {
+                        Text("まとめて削除する写真 \(totalCount) 枚")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 4)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    if groups.isEmpty {
+                        emptyState
+                            .frame(maxWidth: .infinity, alignment: .center)
                     } else {
-                        ForEach(items) { item in
-                            HStack(spacing: 12) {
-                                Image(uiImage: item.image)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: 48, height: 48)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                VStack(alignment: .leading, spacing: 4) {
-                                    if let creationDate = item.asset.creationDate {
-                                        Text(Self.dateFormatter.string(from: creationDate))
-                                    } else {
-                                        Text("撮影日時不明")
-                                    }
-                                    Text(item.asset.localIdentifier)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.vertical, 4)
+                        ForEach(groups) { group in
+                            groupSection(for: group)
                         }
                     }
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
             }
-            .listStyle(.insetGrouped)
+            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("削除確認")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -632,7 +659,7 @@ private struct DeleteConfirmationSheet: View {
                     onConfirmDeletion()
                     dismiss()
                 } label: {
-                    Label("削除確定", systemImage: "trash.fill")
+                    Label(confirmationTitle, systemImage: "trash.fill")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
@@ -640,8 +667,102 @@ private struct DeleteConfirmationSheet: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .padding()
-                .disabled(items.isEmpty)
+                .disabled(groups.isEmpty)
             }
+        }
+    }
+
+    private var confirmationTitle: String {
+        totalCount > 0 ? "削除確定 (\(totalCount))" : "削除確定"
+    }
+
+    @ViewBuilder
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Label("削除候補はありません", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
+            Text("バケツに入れた写真がここにまとめて表示されます。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .padding(32)
+    }
+
+    @ViewBuilder
+    private func groupSection(for group: PhotoLibraryViewModel.BucketGroup) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("グループ \(group.displayIndex)")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                if let summary = dateSummary(for: group) {
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
+                bucketRow(for: item)
+                    .padding(.vertical, 4)
+
+                if index < group.items.count - 1 {
+                    Divider()
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color(uiColor: .separator), lineWidth: 1)
+        )
+        .transition(.opacity.combined(with: .scale))
+    }
+
+    @ViewBuilder
+    private func bucketRow(for item: PhotoLibraryViewModel.AssetThumbnail) -> some View {
+        HStack(spacing: 12) {
+            Image(uiImage: item.image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 54, height: 54)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                if let creationDate = item.asset.creationDate {
+                    Text(Self.detailFormatter.string(from: creationDate))
+                } else {
+                    Text("撮影日時不明")
+                }
+                Text(item.asset.localIdentifier)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    private func dateSummary(for group: PhotoLibraryViewModel.BucketGroup) -> String? {
+        let dates = group.items.compactMap { $0.asset.creationDate }
+        guard let earliest = dates.min(), let latest = dates.max() else { return nil }
+
+        if Calendar.current.isDate(earliest, inSameDayAs: latest) {
+            let day = Self.dateFormatter.string(from: earliest)
+            let start = Self.timeFormatter.string(from: earliest)
+            let end = Self.timeFormatter.string(from: latest)
+            if start == end {
+                return "\(day) \(start)"
+            } else {
+                return "\(day) \(start)〜\(end)"
+            }
+        } else {
+            return Self.intervalFormatter.string(from: earliest, to: latest)
         }
     }
 }
