@@ -10,6 +10,7 @@ import Photos
 
 struct ContentView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var libraryViewModel = PhotoLibraryViewModel()
     @StateObject private var permissionViewModel = PhotoAuthorizationViewModel()
 
@@ -17,6 +18,9 @@ struct ContentView: View {
     @State private var isDeleteSheetPresented = false
     @State private var isFullScreenPresented = false
     @State private var viewerSelectionIndex = 0
+    @State private var isPerformingDeletion = false
+    @State private var alertContext: MessageAlertContext?
+    @State private var shouldNavigateToSettings = false
     private let currentModeTitle = "類似写真の整理モード"
 
     var body: some View {
@@ -54,21 +58,79 @@ struct ContentView: View {
 }
 
 private extension ContentView {
+    @MainActor
+    private func performDeletion() async {
+        guard !isPerformingDeletion else { return }
+        isPerformingDeletion = true
+        defer { isPerformingDeletion = false }
+
+        do {
+            let deletedCount = try await libraryViewModel.deleteBucketItems()
+            alertContext = MessageAlertContext(
+                title: "削除が完了しました",
+                message: "\(deletedCount)枚の写真を『最近削除した項目』に移動しました。写真アプリの『最近削除した項目』から復元できます。"
+            )
+        } catch let error as PhotoLibraryViewModel.DeletionError {
+            alertContext = MessageAlertContext(
+                title: "削除できません",
+                message: error.errorDescription ?? "不明なエラーが発生しました。"
+            )
+        } catch {
+            alertContext = MessageAlertContext(
+                title: "削除できません",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func advanceToNextGroup() {
+        do {
+            let didAdvance = try libraryViewModel.advanceToNextGroup()
+            if didAdvance && libraryViewModel.remainingAdvanceQuota == 0 {
+                alertContext = MessageAlertContext(
+                    title: "本日の仕分け上限に達しました",
+                    message: "無料プランの仕分け上限に達しました。翌日0:00にリセットされます。",
+                    allowsUpgradeAction: true
+                )
+            }
+        } catch let error as PhotoLibraryViewModel.GroupAdvanceError {
+            alertContext = MessageAlertContext(
+                title: "本日の上限に達しました",
+                message: error.errorDescription ?? "無料プランの上限に達しました。翌日0:00にリセットされます。",
+                allowsUpgradeAction: true
+            )
+        } catch {
+            alertContext = MessageAlertContext(
+                title: "仕分けできません",
+                message: error.localizedDescription
+            )
+        }
+    }
+
     func authorizedContent(showLimitedBanner: Bool) -> some View {
         NavigationStack {
-            GeometryReader { proxy in
-                let metrics = LayoutMetrics(containerSize: proxy.size, dynamicType: dynamicTypeSize)
+            ZStack {
+                GeometryReader { proxy in
+                    let metrics = LayoutMetrics(containerSize: proxy.size, dynamicType: dynamicTypeSize)
 
-                VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
-                    if showLimitedBanner {
-                        LimitedAccessBanner(onOpenSettings: permissionViewModel.openSettings)
+                    VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
+                        if showLimitedBanner {
+                            LimitedAccessBanner(onOpenSettings: permissionViewModel.openSettings)
+                        }
+
+                        photoGroupSection(metrics: metrics)
                     }
-
-                    photoGroupSection(metrics: metrics)
+                    .padding(metrics.containerPadding)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(Color(uiColor: .systemBackground))
                 }
-                .padding(metrics.containerPadding)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Color(uiColor: .systemBackground))
+
+                NavigationLink(isActive: $shouldNavigateToSettings) {
+                    SettingsView(libraryViewModel: libraryViewModel)
+                } label: {
+                    EmptyView()
+                }
+                .hidden()
             }
             .navigationTitle(currentModeTitle)
             .navigationBarTitleDisplayMode(.inline)
@@ -83,9 +145,15 @@ private extension ContentView {
                 }
             }
         }
+        .onAppear {
+            libraryViewModel.refreshAdvanceQuotaIfNeeded()
+        }
         .sheet(isPresented: $isDeleteSheetPresented) {
-            DeleteConfirmationSheet(groups: libraryViewModel.bucketItemGroups) {
-                libraryViewModel.clearBucketAfterDeletion()
+            DeleteConfirmationSheet(
+                groups: libraryViewModel.bucketItemGroups,
+                isProcessing: isPerformingDeletion
+            ) {
+                Task { await performDeletion() }
             }
         }
         .fullScreenCover(isPresented: $isFullScreenPresented) {
@@ -106,6 +174,29 @@ private extension ContentView {
             }
             if viewerSelectionIndex >= newGroup.count {
                 viewerSelectionIndex = max(0, newGroup.count - 1)
+            }
+        }
+        .alert(item: $alertContext) { context in
+            if context.allowsUpgradeAction {
+                return Alert(
+                    title: Text(context.title),
+                    message: Text(context.message),
+                    primaryButton: .default(Text("OK")),
+                    secondaryButton: .default(Text("上限を解除"), action: {
+                        shouldNavigateToSettings = true
+                    })
+                )
+            } else {
+                return Alert(
+                    title: Text(context.title),
+                    message: Text(context.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                libraryViewModel.refreshAdvanceQuotaIfNeeded()
             }
         }
     }
@@ -155,7 +246,7 @@ private extension ContentView {
     func actionButtons(metrics: LayoutMetrics) -> some View {
         VStack(alignment: .leading, spacing: metrics.buttonSpacing) {
             Button {
-                libraryViewModel.advanceToNextGroup()
+                advanceToNextGroup()
             } label: {
                 Label("バケツ候補をバケツに送って次へ", systemImage: "trash.slash")
                     .font(.subheadline.weight(.semibold))
@@ -165,18 +256,27 @@ private extension ContentView {
             .buttonStyle(.borderedProminent)
             .tint(Color.green.opacity(0.85))
 
-            Button {
-                isDeleteSheetPresented = true
-            } label: {
-                Label("バケツを空にする", systemImage: "trash.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, metrics.buttonVerticalPadding * 0.8)
+            HStack(spacing: metrics.buttonSpacing) {
+                BucketBadgeButton(count: libraryViewModel.bucketItems.count) {
+                    isDeleteSheetPresented = true
+                }
+                .disabled(!libraryViewModel.hasBucketItems)
+                .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
+
+                Button {
+                    isDeleteSheetPresented = true
+                } label: {
+                    Text("バケツを空にする")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, metrics.buttonVerticalPadding * 0.8)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .frame(maxWidth: .infinity)
+                .disabled(!libraryViewModel.hasBucketItems)
+                .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .disabled(!libraryViewModel.hasBucketItems)
-            .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
         }
     }
 
@@ -617,8 +717,22 @@ private struct FullScreenPhotoViewer: View {
     }
 }
 
+private struct MessageAlertContext: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let allowsUpgradeAction: Bool
+
+    init(title: String, message: String, allowsUpgradeAction: Bool = false) {
+        self.title = title
+        self.message = message
+        self.allowsUpgradeAction = allowsUpgradeAction
+    }
+}
+
 private struct DeleteConfirmationSheet: View {
     let groups: [PhotoLibraryViewModel.BucketGroup]
+    let isProcessing: Bool
     let onConfirmDeletion: () -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -671,10 +785,12 @@ private struct DeleteConfirmationSheet: View {
                         emptyState
                             .frame(maxWidth: .infinity, alignment: .center)
                     } else {
+                        deletionInfoCard
                         ForEach(groups) { group in
                             groupSection(for: group)
                         }
                     }
+
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
@@ -690,24 +806,55 @@ private struct DeleteConfirmationSheet: View {
             }
             .safeAreaInset(edge: .bottom) {
                 Button {
+                    guard !isProcessing else { return }
                     onConfirmDeletion()
                     dismiss()
                 } label: {
-                    Label(confirmationTitle, systemImage: "trash.fill")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
+                    if isProcessing {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                    } else {
+                        Label(confirmButtonTitle, systemImage: "trash.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .padding()
-                .disabled(groups.isEmpty)
+                .disabled(isConfirmDisabled)
             }
         }
     }
 
-    private var confirmationTitle: String {
-        totalCount > 0 ? "削除確定 (\(totalCount))" : "削除確定"
+    private var confirmButtonTitle: String {
+        totalCount > 0 ? "削除確定 (\(totalCount)枚)" : "削除確定"
+    }
+
+    private var isConfirmDisabled: Bool {
+        groups.isEmpty || isProcessing
+    }
+
+    @ViewBuilder
+    private var deletionInfoCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "trash.circle")
+                .font(.title3)
+                .foregroundStyle(Color.secondary)
+            Text("削除後の写真は写真アプリの『最近削除した項目』に移動し、30日以内なら復元できます。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
     }
 
     @ViewBuilder
@@ -797,6 +944,54 @@ private struct DeleteConfirmationSheet: View {
             }
         } else {
             return Self.intervalFormatter.string(from: earliest, to: latest)
+        }
+    }
+}
+
+private struct BucketBadgeButton: View {
+    let count: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 48, height: 48)
+                    .overlay {
+                        Image(systemName: "trash.fill")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                    }
+
+                if count > 0 {
+                    BadgeView(count: count)
+                        .offset(x: 12, y: -12)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("バケツに入っている写真")
+        .accessibilityValue("\(count)枚")
+    }
+
+    private struct BadgeView: View {
+        let count: Int
+
+        var body: some View {
+            Text(countDisplay)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(Color.red.opacity(0.9))
+                )
+        }
+
+        private var countDisplay: String {
+            count > 99 ? "99+" : String(count)
         }
     }
 }

@@ -5,6 +5,37 @@ import UIKit
 
 @MainActor
 final class PhotoLibraryViewModel: ObservableObject {
+    enum DeletionError: LocalizedError {
+        case emptyBucket
+        case unauthorized
+        case changesFailed(underlying: Error?)
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyBucket:
+                return "削除候補がありません。"
+            case .unauthorized:
+                return "写真ライブラリへの削除権限がありません。設定アプリからアクセス権を確認してください。"
+            case .changesFailed(let underlying):
+                if let message = underlying?.localizedDescription, !message.isEmpty {
+                    return "削除処理に失敗しました: \(message)"
+                }
+                return "削除処理に失敗しました。時間を置いて再度お試しください。"
+            }
+        }
+    }
+
+    enum GroupAdvanceError: LocalizedError {
+        case quotaExceeded
+
+        var errorDescription: String? {
+            switch self {
+            case .quotaExceeded:
+                return "本日の仕分け上限（\(PhotoLibraryViewModel.dailyAdvanceLimit)回）に達しました。明日0:00以降に再度お試しください。"
+            }
+        }
+    }
+
     struct AssetThumbnail: Identifiable, Equatable {
         let asset: PHAsset
         let image: UIImage
@@ -55,6 +86,9 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
     }
 
+    @Published private(set) var remainingAdvanceQuota: Int = PhotoLibraryViewModel.dailyAdvanceLimit
+    @Published private(set) var advancesPerformedToday: Int = 0
+
     var bucketItemGroups: [BucketGroup] {
         groupedThumbnails.enumerated().compactMap { index, state in
             guard state.isProcessed else { return nil }
@@ -78,19 +112,26 @@ final class PhotoLibraryViewModel: ObservableObject {
 
     static let minGroupingMinutes = 15
     static let maxGroupingMinutes = 240
+    static let dailyAdvanceLimit = 3
     private static let perceptualHashThreshold = 12
     private static let differenceHashThreshold = 18
+    private static let advanceCountKey = "PhotoLibraryViewModel.dailyAdvanceCount"
+    private static let advanceDateKey = "PhotoLibraryViewModel.dailyAdvanceDate"
 
     private let thumbnailCache: PhotoThumbnailCache
     private let fetchOptions: PHFetchOptions
+    private let userDefaults: UserDefaults
 
     private var groupedThumbnails: [GroupState] = []
     private var rawThumbnails: [AssetThumbnail] = []
 
     init(thumbnailCache: PhotoThumbnailCache = .shared,
-         fetchOptions: PHFetchOptions? = nil) {
+         fetchOptions: PHFetchOptions? = nil,
+         userDefaults: UserDefaults = .standard) {
         self.thumbnailCache = thumbnailCache
         self.fetchOptions = fetchOptions ?? PhotoLibraryViewModel.defaultFetchOptions()
+        self.userDefaults = userDefaults
+        refreshAdvanceQuotaIfNeeded()
     }
 
     func loadThumbnails(limit: Int = 60,
@@ -176,6 +217,91 @@ final class PhotoLibraryViewModel: ObservableObject {
         applyUpdatedCurrentGroup(updatedGroup)
     }
 
+    func refreshAdvanceQuotaIfNeeded(currentDate: Date = Date()) {
+        let storedDate = userDefaults.object(forKey: PhotoLibraryViewModel.advanceDateKey) as? Date
+        let calendar = Calendar.current
+
+        let isSameDay = {
+            guard let storedDate else { return false }
+            return calendar.isDate(storedDate, inSameDayAs: currentDate)
+        }()
+
+        if !isSameDay {
+            userDefaults.set(currentDate, forKey: PhotoLibraryViewModel.advanceDateKey)
+            userDefaults.set(0, forKey: PhotoLibraryViewModel.advanceCountKey)
+            advancesPerformedToday = 0
+            remainingAdvanceQuota = PhotoLibraryViewModel.dailyAdvanceLimit
+        } else {
+            let used = userDefaults.integer(forKey: PhotoLibraryViewModel.advanceCountKey)
+            advancesPerformedToday = min(used, PhotoLibraryViewModel.dailyAdvanceLimit)
+            remainingAdvanceQuota = max(0, PhotoLibraryViewModel.dailyAdvanceLimit - advancesPerformedToday)
+        }
+    }
+
+    @discardableResult
+    func deleteBucketItems(currentDate: Date = Date()) async throws -> Int {
+        let groups = bucketItemGroups
+        guard !groups.isEmpty else {
+            throw DeletionError.emptyBucket
+        }
+
+        let assets = groups.flatMap { $0.items.map(\.asset) }
+
+        guard !assets.isEmpty else {
+            throw DeletionError.emptyBucket
+        }
+
+        guard isDeletionAuthorized else {
+            throw DeletionError.unauthorized
+        }
+
+        do {
+            let deletedCount = try await performDeletion(for: assets)
+            clearBucketAfterDeletion()
+            return deletedCount
+        } catch let error as DeletionError {
+            throw error
+        } catch {
+            throw DeletionError.changesFailed(underlying: error)
+        }
+    }
+
+    private func performDeletion(for assets: [PHAsset]) async throws -> Int {
+        try await withCheckedThrowingContinuation { continuation in
+            PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            } completionHandler: { success, error in
+                if success {
+                    continuation.resume(returning: assets.count)
+                } else {
+                    continuation.resume(throwing: DeletionError.changesFailed(underlying: error))
+                }
+            }
+        }
+    }
+
+    private func incrementAdvanceCount(currentDate: Date = Date()) {
+        refreshAdvanceQuotaIfNeeded(currentDate: currentDate)
+        guard remainingAdvanceQuota > 0 else { return }
+
+        var used = userDefaults.integer(forKey: PhotoLibraryViewModel.advanceCountKey)
+        used = min(PhotoLibraryViewModel.dailyAdvanceLimit, used + 1)
+        userDefaults.set(currentDate, forKey: PhotoLibraryViewModel.advanceDateKey)
+        userDefaults.set(used, forKey: PhotoLibraryViewModel.advanceCountKey)
+        advancesPerformedToday = used
+        remainingAdvanceQuota = max(0, PhotoLibraryViewModel.dailyAdvanceLimit - used)
+    }
+
+    private var isDeletionAuthorized: Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        switch status {
+        case .authorized, .limited:
+            return true
+        default:
+            return false
+        }
+    }
+
     func clearBucketAfterDeletion() {
         let groups = bucketItemGroups
         guard !groups.isEmpty else { return }
@@ -213,14 +339,26 @@ final class PhotoLibraryViewModel: ObservableObject {
         currentGroup = groupedThumbnails[currentGroupIndex].thumbnails
     }
 
-    func advanceToNextGroup() {
-        guard !groupedThumbnails.isEmpty else { return }
+    @discardableResult
+    func advanceToNextGroup(currentDate: Date = Date()) throws -> Bool {
+        refreshAdvanceQuotaIfNeeded(currentDate: currentDate)
+
+        guard remainingAdvanceQuota > 0 else {
+            throw GroupAdvanceError.quotaExceeded
+        }
+
+        guard !groupedThumbnails.isEmpty else { return false }
         finalizeCurrentGroup()
-        guard !groupedThumbnails.isEmpty else { return }
+        guard !groupedThumbnails.isEmpty else {
+            incrementAdvanceCount(currentDate: currentDate)
+            return true
+        }
 
         let nextIndex = groupedThumbnails.isEmpty ? 0 : (currentGroupIndex + 1) % groupedThumbnails.count
         currentGroupIndex = nextIndex
         presentGroup(at: currentGroupIndex)
+        incrementAdvanceCount(currentDate: currentDate)
+        return true
     }
 
     private func presentGroup(at index: Int) {
