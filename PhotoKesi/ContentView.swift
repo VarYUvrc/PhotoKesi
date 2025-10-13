@@ -204,9 +204,21 @@ private extension ContentView {
     func photoGroupSection(metrics: LayoutMetrics) -> some View {
         VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
             if libraryViewModel.groupCount > 0 {
-                Text("現在のグループ: \(libraryViewModel.currentGroupIndex + 1) / \(libraryViewModel.groupCount) ・ 時間幅 \(libraryViewModel.groupingWindowMinutes)分")
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
+                GroupNavigationHeader(
+                    current: libraryViewModel.currentGroupNumber,
+                    total: libraryViewModel.groupCount,
+                    canGoPrevious: libraryViewModel.hasPreviousGroup,
+                    canGoNext: libraryViewModel.hasNextDiscoveredGroup,
+                    onPrevious: { libraryViewModel.navigateToPreviousGroup() },
+                    onNext: { _ = libraryViewModel.navigateToNextDiscoveredGroup() }
+                )
+
+                ExplorationStatusBar(
+                    current: libraryViewModel.currentGroupNumber,
+                    total: libraryViewModel.groupCount,
+                    upcomingBuffer: libraryViewModel.upcomingBufferedGroupCount,
+                    isExploring: libraryViewModel.isExploringGroups
+                )
             }
 
             Group {
@@ -280,6 +292,96 @@ private extension ContentView {
         }
     }
 
+}
+
+
+private struct GroupNavigationHeader: View {
+    let current: Int
+    let total: Int
+    let canGoPrevious: Bool
+    let canGoNext: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button(action: onPrevious) {
+                Text("< 前へ")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canGoPrevious ? Color.primary : Color.secondary)
+            .accessibilityLabel("前のグループへ")
+            .disabled(!canGoPrevious)
+
+            Spacer(minLength: 8)
+
+            Text("現在のグループ: \(current) / \(total)")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 8)
+
+            Button(action: onNext) {
+                Text("次へ >")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canGoNext ? Color.primary : Color.secondary)
+            .accessibilityLabel("次のグループへ")
+            .disabled(!canGoNext)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct ExplorationStatusBar: View {
+    let current: Int
+    let total: Int
+    let upcomingBuffer: Int
+    let isExploring: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Label {
+                Text("\(current) / \(total)")
+            } icon: {
+                Image(systemName: "photo.on.rectangle")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Spacer()
+
+            if isExploring {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(0.6, anchor: .center)
+                    Text("探索中…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("探索中")
+            } else {
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(statusText)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+
+    private var statusText: String {
+        if upcomingBuffer > 0 {
+            return "先読み \(upcomingBuffer) グループ"
+        } else {
+            return "続きのグループを準備中"
+        }
+    }
 }
 
 private struct PhotoGroupBoard: View {
