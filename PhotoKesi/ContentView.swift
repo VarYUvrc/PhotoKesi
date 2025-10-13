@@ -122,7 +122,6 @@ private extension ContentView {
                     }
                     .padding(metrics.containerPadding)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .background(Color(uiColor: .systemBackground))
                 }
 
                 NavigationLink(isActive: $shouldNavigateToSettings) {
@@ -145,6 +144,7 @@ private extension ContentView {
                 }
             }
         }
+        .background(LiquidGlassBackdrop().ignoresSafeArea())
         .onAppear {
             libraryViewModel.refreshAdvanceQuotaIfNeeded()
         }
@@ -253,36 +253,56 @@ private extension ContentView {
             Button {
                 advanceToNextGroup()
             } label: {
-                Label("バケツ候補をバケツに送って次へ", systemImage: "trash.slash")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, metrics.buttonVerticalPadding * 0.8)
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.headline)
+                        .foregroundStyle(Color.green.opacity(0.9))
+
+                    Text("バケツ候補をバケツに送って次へ")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.green.opacity(0.95))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 14)
+                .padding(.vertical, metrics.buttonVerticalPadding * 0.85)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.green.opacity(0.85))
+            .buttonStyle(.plain)
+            .glassBackground(cornerRadius: 24,
+                             tintOpacity: 0.18,
+                             tintColor: Color.green,
+                             strokeColor: Color.green,
+                             strokeOpacity: 0.55,
+                             shadowOpacity: 0.12)
+            .accessibilityLabel("候補をバケツに送って次へ")
+            .accessibilityHint("チェック済みを保持したまま次のグループへ進みます")
 
             Button {
                 isDeleteSheetPresented = true
             } label: {
-                HStack(spacing: metrics.buttonSpacing) {
-                    BucketBadgeIcon(count: libraryViewModel.bucketItems.count)
-
+                ZStack(alignment: .center) {
                     Text("バケツを空にする")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(libraryViewModel.hasBucketItems ? .red : .secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    HStack(spacing: metrics.buttonSpacing * 0.9) {
+                        BucketBadgeIcon(count: libraryViewModel.bucketItems.count)
+                        Spacer()
+                    }
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 16)
                 .padding(.vertical, metrics.buttonVerticalPadding * 0.85)
                 .frame(maxWidth: .infinity)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(libraryViewModel.hasBucketItems ? Color.red : Color.red.opacity(0.35), lineWidth: 1.5)
-                )
             }
             .buttonStyle(.plain)
             .disabled(!libraryViewModel.hasBucketItems)
-            .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
+            .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.6)
+            .glassBackground(cornerRadius: 24,
+                             tintOpacity: libraryViewModel.hasBucketItems ? 0.14 : 0.06,
+                             tintColor: .red,
+                             strokeColor: .red,
+                             strokeOpacity: libraryViewModel.hasBucketItems ? 0.6 : 0.25,
+                             shadowOpacity: libraryViewModel.hasBucketItems ? 0.12 : 0.05)
             .accessibilityLabel("バケツを空にする")
             .accessibilityHint("バケツ候補の写真を削除確認へ進みます")
             .accessibilityValue("\(libraryViewModel.bucketItems.count)枚")
@@ -425,7 +445,7 @@ private struct PhotoGroupBoard: View {
                             )
                         }
                     }
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 12)
                 }
             }
         }
@@ -465,6 +485,7 @@ private struct PhotoBoardSkeletonView: View {
 }
 
 private struct PhotoThumbnailCard: View {
+    @Environment(\.colorScheme) private var colorScheme
     let thumbnail: PhotoLibraryViewModel.AssetThumbnail
     let isBest: Bool
     let cardSize: CGSize
@@ -486,48 +507,69 @@ private struct PhotoThumbnailCard: View {
                 }
             }
 
-        ZStack(alignment: .topTrailing) {
-            Image(uiImage: thumbnail.image)
-                .resizable()
-                .scaledToFill()
-                .frame(width: cardSize.width, height: cardSize.height)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
-                        startPoint: .center,
-                        endPoint: .bottom
+        let outerShape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+        let innerShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        let surfaceColor = colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+        let highlightGradient = LinearGradient(
+            colors: [
+                Color.black.opacity(0.0),
+                Color.black.opacity(colorScheme == .dark ? 0.52 : 0.36)
+            ],
+            startPoint: .center,
+            endPoint: .bottom
+        )
+
+        return ZStack(alignment: .topTrailing) {
+            ZStack {
+                outerShape
+                    .fill(surfaceColor)
+
+                Image(uiImage: thumbnail.image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: cardSize.width - 18)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 10)
+                    .clipShape(innerShape)
+                    .overlay(
+                        highlightGradient
+                            .clipShape(innerShape)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                )
-                .overlay(alignment: .bottomLeading) {
-                    if let creationDate = thumbnail.asset.creationDate {
-                        Text(PhotoThumbnailCard.dateFormatter.string(from: creationDate))
-                            .font(.footnote)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                Capsule()
-                                    .fill(Color.white.opacity(0.25))
-                            )
-                            .padding([.leading, .bottom], 16)
-                    }
+            }
+            .frame(width: cardSize.width, height: cardSize.height)
+            .clipShape(outerShape)
+            .overlay(
+                outerShape.stroke(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.12), lineWidth: 0.8)
+            )
+            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.18), radius: 12, x: 0, y: 8)
+            .overlay(alignment: .bottomLeading) {
+                if let creationDate = thumbnail.asset.creationDate {
+                    Text(PhotoThumbnailCard.dateFormatter.string(from: creationDate))
+                        .font(.footnote)
+                        .fontWeight(.medium)
+                        .foregroundStyle(Color.white.opacity(0.95))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Color.black.opacity(colorScheme == .dark ? 0.45 : 0.28))
+                        )
+                        .padding([.leading, .bottom], 18)
                 }
-                .overlay(alignment: .top) {
-                    if isBest {
-                        BestBadge()
-                            .padding(.top, 12)
-                    }
+            }
+            .overlay(alignment: .topLeading) {
+                if isBest {
+                    BestBadge()
+                        .padding(.top, 14)
+                        .padding(.leading, 14)
                 }
-                .shadow(color: thumbnail.isChecked ? .white.opacity(0.25) : .black.opacity(0.2), radius: 12, x: 0, y: 6)
+            }
 
             CheckBadgeButton(isChecked: thumbnail.isChecked, isDisabled: isToggleDisabled, action: onToggleCheck)
                 .padding(16)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .frame(width: cardSize.width, height: cardSize.height)
+        .contentShape(outerShape)
         .onTapGesture(perform: onOpenViewer)
         .gesture(dragGesture)
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: thumbnail.isChecked)
@@ -1041,6 +1083,179 @@ private struct BucketBadgeIcon: View {
         private var countDisplay: String {
             count > 99 ? "99+" : String(count)
         }
+    }
+}
+
+
+private struct LiquidGlassBackdrop: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        Group {
+            if reduceTransparency {
+                Color(uiColor: colorScheme == .dark ? .black : .systemGroupedBackground)
+            } else {
+                ZStack {
+                    LinearGradient(
+                        gradient: Gradient(colors: baseColors),
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+
+                    RadialGradient(
+                        gradient: Gradient(colors: bloomColors),
+                        center: .topLeading,
+                        startRadius: 40,
+                        endRadius: 420
+                    )
+                    .blendMode(.screen)
+                    .opacity(colorScheme == .dark ? 0.55 : 0.45)
+
+                    RadialGradient(
+                        gradient: Gradient(colors: sheenColors),
+                        center: .bottomTrailing,
+                        startRadius: 120,
+                        endRadius: 520
+                    )
+                    .blendMode(.overlay)
+                    .opacity(colorScheme == .dark ? 0.3 : 0.18)
+                }
+                .overlay(
+                    LinearGradient(
+                        gradient: Gradient(colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.08 : 0.18),
+                            Color.white.opacity(0.02)
+                        ]),
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            }
+        }
+    }
+
+    private var baseColors: [Color] {
+        if colorScheme == .dark {
+            return [
+                Color(red: 0.06, green: 0.09, blue: 0.18),
+                Color(red: 0.08, green: 0.11, blue: 0.2),
+                Color(red: 0.12, green: 0.16, blue: 0.26)
+            ]
+        } else {
+            return [
+                Color(red: 0.88, green: 0.95, blue: 1.0),
+                Color(red: 0.96, green: 0.92, blue: 1.0),
+                Color(red: 0.92, green: 0.97, blue: 0.91)
+            ]
+        }
+    }
+
+    private var bloomColors: [Color] {
+        if colorScheme == .dark {
+            return [
+                Color(red: 0.34, green: 0.58, blue: 0.96, opacity: 0.65),
+                Color(red: 0.26, green: 0.37, blue: 0.68, opacity: 0.7),
+                Color(red: 0.14, green: 0.2, blue: 0.38, opacity: 0.45)
+            ]
+        } else {
+            return [
+                Color(red: 0.68, green: 0.86, blue: 1.0, opacity: 0.65),
+                Color(red: 1.0, green: 0.86, blue: 0.75, opacity: 0.55),
+                Color(red: 0.82, green: 0.94, blue: 0.89, opacity: 0.45)
+            ]
+        }
+    }
+
+    private var sheenColors: [Color] {
+        if colorScheme == .dark {
+            return [
+                Color(red: 0.26, green: 0.3, blue: 0.5, opacity: 0.4),
+                Color(red: 0.16, green: 0.2, blue: 0.34, opacity: 0.12)
+            ]
+        } else {
+            return [
+                Color(red: 1.0, green: 0.96, blue: 0.88, opacity: 0.55),
+                Color(red: 0.92, green: 0.96, blue: 0.99, opacity: 0.08)
+            ]
+        }
+    }
+}
+
+
+private struct GlassBackgroundModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    let tintColor: Color
+    let tintOpacity: Double
+    let strokeColor: Color
+    let strokeOpacity: Double
+    let shadowOpacity: Double
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        let effectiveTintOpacity = colorScheme == .dark ? tintOpacity * 0.55 : tintOpacity
+        let highlightPrimary = Color.white.opacity(colorScheme == .dark ? 0.22 : 0.38)
+        let highlightSecondary = Color.white.opacity(colorScheme == .dark ? 0.05 : 0.08)
+        let shadowColor = Color.black.opacity(colorScheme == .dark ? shadowOpacity : shadowOpacity * 0.7)
+
+        content
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        tintColor.opacity(effectiveTintOpacity),
+                                        tintColor.opacity(effectiveTintOpacity * 0.65)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        highlightPrimary,
+                                        highlightSecondary
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .blendMode(.screen)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(strokeColor.opacity(strokeOpacity), lineWidth: 1)
+                    )
+                    .compositingGroup()
+            )
+            .shadow(color: shadowColor, radius: 16, x: 0, y: 6)
+    }
+}
+
+private extension View {
+    func glassBackground(cornerRadius: CGFloat = 24,
+                         tintOpacity: Double = 0.12,
+                         tintColor: Color = .white,
+                         strokeColor: Color = .white,
+                         strokeOpacity: Double = 0.45,
+                         shadowOpacity: Double = 0.1) -> some View {
+        modifier(
+            GlassBackgroundModifier(
+                cornerRadius: cornerRadius,
+                tintColor: tintColor,
+                tintOpacity: tintOpacity,
+                strokeColor: strokeColor,
+                strokeOpacity: strokeOpacity,
+                shadowOpacity: shadowOpacity
+            )
+        )
     }
 }
 

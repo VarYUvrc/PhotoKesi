@@ -122,7 +122,7 @@ struct SettingsView: View {
                 featureRow(title: "1日の仕分け確定", free: "3回まで", paid: "無制限")
                 featureRow(title: "スクリーンショット整理", free: "×", paid: "◯")
                 featureRow(title: "理由バッジ表示", free: "×", paid: "◯")
-                featureRow(title: "アプリのテーマカラー選択", free: "3色のみ", paid: "カスタムカラー")
+                featureRow(title: "アプリのテーマカラー選択", free: "3色のみ", paid: "カスタム")
             }
 
             Text("※表示はダミーです。サブスクリプション決済はまだ提供していません。")
