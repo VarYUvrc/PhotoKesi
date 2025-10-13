@@ -212,13 +212,6 @@ private extension ContentView {
                     onPrevious: { libraryViewModel.navigateToPreviousGroup() },
                     onNext: { _ = libraryViewModel.navigateToNextDiscoveredGroup() }
                 )
-
-                ExplorationStatusBar(
-                    current: libraryViewModel.currentGroupNumber,
-                    total: libraryViewModel.groupCount,
-                    upcomingBuffer: libraryViewModel.upcomingBufferedGroupCount,
-                    isExploring: libraryViewModel.isExploringGroups
-                )
             }
 
             Group {
@@ -268,27 +261,31 @@ private extension ContentView {
             .buttonStyle(.borderedProminent)
             .tint(Color.green.opacity(0.85))
 
-            HStack(spacing: metrics.buttonSpacing) {
-                BucketBadgeButton(count: libraryViewModel.bucketItems.count) {
-                    isDeleteSheetPresented = true
-                }
-                .disabled(!libraryViewModel.hasBucketItems)
-                .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
+            Button {
+                isDeleteSheetPresented = true
+            } label: {
+                HStack(spacing: metrics.buttonSpacing) {
+                    BucketBadgeIcon(count: libraryViewModel.bucketItems.count)
 
-                Button {
-                    isDeleteSheetPresented = true
-                } label: {
                     Text("バケツを空にする")
                         .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, metrics.buttonVerticalPadding * 0.8)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+                .padding(.horizontal, 12)
+                .padding(.vertical, metrics.buttonVerticalPadding * 0.85)
                 .frame(maxWidth: .infinity)
-                .disabled(!libraryViewModel.hasBucketItems)
-                .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(libraryViewModel.hasBucketItems ? Color.red : Color.red.opacity(0.35), lineWidth: 1.5)
+                )
             }
+            .buttonStyle(.plain)
+            .disabled(!libraryViewModel.hasBucketItems)
+            .opacity(libraryViewModel.hasBucketItems ? 1.0 : 0.5)
+            .accessibilityLabel("バケツを空にする")
+            .accessibilityHint("バケツ候補の写真を削除確認へ進みます")
+            .accessibilityValue("\(libraryViewModel.bucketItems.count)枚")
         }
     }
 
@@ -316,7 +313,7 @@ private struct GroupNavigationHeader: View {
 
             Spacer(minLength: 8)
 
-            Text("現在のグループ: \(current) / \(total)")
+            Text("類似グループ: \(current) / \(total)")
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .multilineTextAlignment(.center)
@@ -334,53 +331,6 @@ private struct GroupNavigationHeader: View {
             .disabled(!canGoNext)
         }
         .padding(.vertical, 4)
-    }
-}
-
-private struct ExplorationStatusBar: View {
-    let current: Int
-    let total: Int
-    let upcomingBuffer: Int
-    let isExploring: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Label {
-                Text("\(current) / \(total)")
-            } icon: {
-                Image(systemName: "photo.on.rectangle")
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-            Spacer()
-
-            if isExploring {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .scaleEffect(0.6, anchor: .center)
-                    Text("探索中…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityLabel("探索中")
-            } else {
-                Text(statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel(statusText)
-            }
-        }
-        .padding(.bottom, 4)
-    }
-
-    private var statusText: String {
-        if upcomingBuffer > 0 {
-            return "先読み \(upcomingBuffer) グループ"
-        } else {
-            return "続きのグループを準備中"
-        }
     }
 }
 
@@ -619,6 +569,8 @@ private struct CheckBadgeButton: View {
 }
 
 private struct BestBadge: View {
+    private let badgeColor = Color(red: 1.0, green: 0.84, blue: 0.0)
+
     var body: some View {
         Text("best✨")
             .font(.caption.weight(.semibold))
@@ -626,7 +578,7 @@ private struct BestBadge: View {
             .padding(.vertical, 6)
             .background(
                 Capsule()
-                    .fill(Color.yellow.opacity(0.85))
+                    .fill(badgeColor)
             )
             .foregroundStyle(.black)
             .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
@@ -1050,31 +1002,25 @@ private struct DeleteConfirmationSheet: View {
     }
 }
 
-private struct BucketBadgeButton: View {
+private struct BucketBadgeIcon: View {
     let count: Int
-    let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            ZStack(alignment: .topTrailing) {
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 48, height: 48)
-                    .overlay {
-                        Image(systemName: "trash.fill")
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                    }
-
-                if count > 0 {
-                    BadgeView(count: count)
-                        .offset(x: 12, y: -12)
+        ZStack(alignment: .topTrailing) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 48, height: 48)
+                .overlay {
+                    Image(systemName: "trash.fill")
+                        .font(.headline)
+                        .foregroundStyle(.white)
                 }
+
+            if count > 0 {
+                BadgeView(count: count)
+                    .offset(x: 12, y: -12)
             }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("バケツに入っている写真")
-        .accessibilityValue("\(count)枚")
     }
 
     private struct BadgeView: View {
