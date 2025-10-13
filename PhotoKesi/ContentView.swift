@@ -157,10 +157,10 @@ private extension ContentView {
             Button {
                 libraryViewModel.advanceToNextGroup()
             } label: {
-                Label("仕分けを完了して次のグループへ", systemImage: "trash.slash")
-                    .font(.headline)
+                Label("バケツ候補をバケツに送って次へ", systemImage: "trash.slash")
+                    .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, metrics.buttonVerticalPadding)
+                    .padding(.vertical, metrics.buttonVerticalPadding * 0.8)
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.green.opacity(0.85))
@@ -169,9 +169,9 @@ private extension ContentView {
                 isDeleteSheetPresented = true
             } label: {
                 Label("バケツを空にする", systemImage: "trash.fill")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, metrics.buttonVerticalPadding)
+                    .padding(.vertical, metrics.buttonVerticalPadding * 0.8)
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
@@ -217,7 +217,7 @@ private struct PhotoGroupBoard: View {
             )
 
             boardSection(
-                title: "バケツ",
+                title: "バケツ送り候補",
                 systemImage: "trash",
                 thumbnails: unchecked,
                 isUpperRow: false
@@ -247,7 +247,7 @@ private struct PhotoGroupBoard: View {
                     .fill(Color.secondary.opacity(0.08))
                     .frame(height: metrics.placeholderHeight)
                     .overlay(
-                        Text(isUpperRow ? "チェックが付いた写真はここに並びます" : "バケツの写真はここに並びます")
+                        Text(isUpperRow ? "残す写真なし。すべてバケツに送ります" : "バケツ送り候補なし")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     )
@@ -286,7 +286,7 @@ private struct PhotoBoardSkeletonView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: metrics.boardSpacing) {
             skeletonRow(title: "残す写真")
-            skeletonRow(title: "バケツ")
+            skeletonRow(title: "バケツ送り候補")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .redacted(reason: .placeholder)
@@ -439,6 +439,8 @@ private struct FullScreenPhotoViewer: View {
 
     @State private var highResolutionImages: [String: UIImage] = [:]
     @State private var loadingIdentifiers: Set<String> = []
+    @State private var zoomLevels: [String: CGFloat] = [:]
+    @State private var isZoomed = false
 
     var body: some View {
         ZStack {
@@ -450,26 +452,22 @@ private struct FullScreenPhotoViewer: View {
             } else {
                 TabView(selection: $selectedIndex) {
                     ForEach(Array(thumbnails.enumerated()), id: \.0) { index, item in
-                        GeometryReader { geometry in
-                            let displayImage = highResolutionImages[item.id] ?? item.image
+                        ZStack {
+                            ZoomableImageView(
+                                image: highResolutionImages[item.id] ?? item.image,
+                                zoomScale: zoomBinding(for: item.id)
+                            )
 
-                            Image(uiImage: displayImage)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: geometry.size.width, height: geometry.size.height)
-                                .clipped()
-                                .overlay(alignment: .top) {
-                                    if item.isBest {
-                                        BestBadge()
-                                            .padding(.top, 24)
-                                    }
-                                }
-                                .overlay {
-                                    if loadingIdentifiers.contains(item.id) && highResolutionImages[item.id] == nil {
-                                        ProgressView()
-                                            .tint(.white)
-                                    }
-                                }
+                            if item.isBest {
+                                BestBadge()
+                                    .padding(.top, 24)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            }
+
+                            if loadingIdentifiers.contains(item.id) && highResolutionImages[item.id] == nil {
+                                ProgressView()
+                                    .tint(.white)
+                            }
                         }
                         .tag(index)
                     }
@@ -512,6 +510,7 @@ private struct FullScreenPhotoViewer: View {
         .gesture(
             DragGesture(minimumDistance: 40)
                 .onEnded { value in
+                    guard !isZoomed else { return }
                     let horizontal = value.translation.width
                     let vertical = value.translation.height
                     guard abs(vertical) > abs(horizontal) else { return }
@@ -524,12 +523,15 @@ private struct FullScreenPhotoViewer: View {
             if selectedIndex >= newValue.count {
                 selectedIndex = max(0, newValue.count - 1)
             }
+            synchronizeZoomLevels(with: newValue)
             prefetchHighResolutionImages(around: selectedIndex)
         }
         .onAppear {
+            synchronizeZoomLevels(with: thumbnails)
             prefetchHighResolutionImages(around: selectedIndex)
         }
         .onChange(of: selectedIndex) { newValue in
+            resetZoom(for: thumbnails, at: newValue)
             prefetchHighResolutionImages(around: newValue)
         }
     }
@@ -580,6 +582,38 @@ private struct FullScreenPhotoViewer: View {
         for key in highResolutionImages.keys where !allowedIDs.contains(key) {
             highResolutionImages.removeValue(forKey: key)
         }
+    }
+    
+    private func zoomBinding(for assetID: String) -> Binding<CGFloat> {
+        Binding(
+            get: { zoomLevels[assetID] ?? 1 },
+            set: { newValue in
+                zoomLevels[assetID] = newValue
+                isZoomed = newValue > 1.01
+                if newValue <= 1.01 {
+                    zoomLevels[assetID] = 1
+                }
+            }
+        )
+    }
+
+    private func synchronizeZoomLevels(with thumbnails: [PhotoLibraryViewModel.AssetThumbnail]) {
+        let existingIDs = Set(thumbnails.map(\.id))
+        zoomLevels = zoomLevels.filter { existingIDs.contains($0.key) }
+
+        if let current = thumbnails[safe: selectedIndex] {
+            zoomLevels[current.id] = 1
+        }
+        isZoomed = false
+    }
+
+    private func resetZoom(for thumbnails: [PhotoLibraryViewModel.AssetThumbnail], at index: Int) {
+        guard let item = thumbnails[safe: index] else {
+            isZoomed = false
+            return
+        }
+        zoomLevels[item.id] = 1
+        isZoomed = false
     }
 }
 
