@@ -3,6 +3,8 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var libraryViewModel: PhotoLibraryViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var isRetentionResetAlertPresented = false
+    @State private var isResettingRetentionFlags = false
 
     private let stepMinutes = 15
     private let minMinutes = PhotoLibraryViewModel.minGroupingMinutes
@@ -58,6 +60,20 @@ struct SettingsView: View {
         .onAppear {
             libraryViewModel.refreshAdvanceQuotaIfNeeded()
         }
+        .alert("「残す」フラグをリセット", isPresented: $isRetentionResetAlertPresented) {
+            Button("キャンセル", role: .cancel) {}
+            Button("リセット", role: .destructive) {
+                isResettingRetentionFlags = true
+                Task {
+                    await libraryViewModel.resetRetainedFlags()
+                    await MainActor.run {
+                        isResettingRetentionFlags = false
+                    }
+                }
+            }
+        } message: {
+            Text("これまでに仕分けで「残す」にした写真を再び探索対象に戻します。バケツの内容は変わりません。")
+        }
     }
 
     private var usageCard: some View {
@@ -99,6 +115,38 @@ struct SettingsView: View {
             Text("無料プランは1日に最大 \(PhotoLibraryViewModel.dailyAdvanceLimit) 回まで仕分けできます。0:00に自動でリセットされます。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Divider()
+
+            Button {
+                isRetentionResetAlertPresented = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.counterclockwise.circle")
+                        .font(.title3)
+                        .foregroundStyle(.blue)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("「残す」フラグをリセット")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(isResettingRetentionFlags ? Color.secondary : Color.primary)
+
+                        Text("確定済みの写真が再び探索対象になります。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if isResettingRetentionFlags {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .disabled(isResettingRetentionFlags)
         }
     }
 
@@ -122,7 +170,7 @@ struct SettingsView: View {
                 featureRow(title: "1日の仕分け確定", free: "3回まで", paid: "無制限")
                 featureRow(title: "スクリーンショット整理", free: "×", paid: "◯")
                 featureRow(title: "理由バッジ表示", free: "×", paid: "◯")
-                featureRow(title: "カラーパレット追加", free: "3色のみ", paid: "パステル3色追加")
+                featureRow(title: "アプリのテーマカラー選択", free: "3色のみ", paid: "カスタム")
             }
 
             Text("※表示はダミーです。サブスクリプション決済はまだ提供していません。")

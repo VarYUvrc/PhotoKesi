@@ -25,16 +25,17 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
     }
 
-    enum GroupAdvanceError: LocalizedError {
+    enum GroupAdvanceError: Error {
         case quotaExceeded
 
-        var errorDescription: String? {
+        var message: String {
             switch self {
             case .quotaExceeded:
                 return "本日の仕分け上限（\(PhotoLibraryViewModel.dailyAdvanceLimit)回）に達しました。明日0:00以降に再度お試しください。"
             }
         }
     }
+
 
     struct AssetThumbnail: Identifiable, Equatable {
         let asset: PHAsset
@@ -43,6 +44,7 @@ final class PhotoLibraryViewModel: ObservableObject {
         var isChecked: Bool = false
         var isInBucket: Bool = false
         var isBest: Bool = false
+        var isRetained: Bool = false
 
         var id: String { asset.localIdentifier }
         var sharpnessScore: Double { signature.sharpnessScore }
@@ -52,6 +54,7 @@ final class PhotoLibraryViewModel: ObservableObject {
             && lhs.isChecked == rhs.isChecked
             && lhs.isInBucket == rhs.isInBucket
             && lhs.isBest == rhs.isBest
+            && lhs.isRetained == rhs.isRetained
         }
     }
 
@@ -66,12 +69,32 @@ final class PhotoLibraryViewModel: ObservableObject {
     private struct GroupState {
         var thumbnails: [AssetThumbnail]
         var isProcessed: Bool
+
+        var identifierKey: String {
+            thumbnails.map(\.id).sorted().joined(separator: "|")
+        }
+
+        var idSet: Set<String> {
+            Set(thumbnails.map(\.id))
+        }
+    }
+
+    private struct AssetSnapshot {
+        let isChecked: Bool
+        let isInBucket: Bool
+        let isBest: Bool
+        let isRetained: Bool
     }
 
     @Published private(set) var currentGroup: [AssetThumbnail] = []
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var currentGroupIndex: Int = 0
     @Published private(set) var didFinishInitialLoad: Bool = false
+    @Published private(set) var remainingAdvanceQuota: Int = 0
+    @Published private(set) var advancesPerformedToday: Int = 0
+    @Published private(set) var discoveredGroupCount: Int = 0
+    @Published private(set) var upcomingBufferedGroupCount: Int = 0
+    @Published private(set) var isExploringGroups: Bool = false
     @Published var groupingWindowMinutes: Int = 60 {
         didSet {
             let clamped = max(Self.minGroupingMinutes, min(groupingWindowMinutes, Self.maxGroupingMinutes))
@@ -81,13 +104,13 @@ final class PhotoLibraryViewModel: ObservableObject {
             }
 
             if oldValue != groupingWindowMinutes {
-                regroupThumbnailsFromRaw(resetGroupIndex: false)
+                rebuildGroupsFromRaw(resetGroupIndex: false)
+                Task { [weak self] in
+                    await self?.fetchAdditionalThumbnailsIfNeeded(minUpcomingCount: Self.targetUpcomingGroupCount)
+                }
             }
         }
     }
-
-    @Published private(set) var remainingAdvanceQuota: Int = PhotoLibraryViewModel.dailyAdvanceLimit
-    @Published private(set) var advancesPerformedToday: Int = 0
 
     var bucketItemGroups: [BucketGroup] {
         groupedThumbnails.enumerated().compactMap { index, state in
@@ -106,31 +129,49 @@ final class PhotoLibraryViewModel: ObservableObject {
         !bucketItemGroups.isEmpty
     }
 
-    var groupCount: Int {
-        groupedThumbnails.count
+    var groupCount: Int { discoveredGroupCount }
+
+    var currentGroupNumber: Int {
+        guard !groupedThumbnails.isEmpty else { return 0 }
+        return currentGroupIndex + 1
     }
+
+    var hasPreviousGroup: Bool { currentGroupIndex > 0 }
+    var hasNextDiscoveredGroup: Bool { currentGroupIndex + 1 < groupedThumbnails.count }
 
     static let minGroupingMinutes = 15
     static let maxGroupingMinutes = 240
-    static let dailyAdvanceLimit = 3
+    nonisolated static let dailyAdvanceLimit = 3
     private static let perceptualHashThreshold = 12
     private static let differenceHashThreshold = 18
     private static let advanceCountKey = "PhotoLibraryViewModel.dailyAdvanceCount"
     private static let advanceDateKey = "PhotoLibraryViewModel.dailyAdvanceDate"
+    private static let targetUpcomingGroupCount = 10
+    private static let bufferReplenishThreshold = 7
+    private static let initialFetchBatchSize = 80
+    private static let subsequentFetchBatchSize = 40
 
     private let thumbnailCache: PhotoThumbnailCache
     private let fetchOptions: PHFetchOptions
     private let userDefaults: UserDefaults
+    private let retentionStore: PhotoRetentionStore
 
     private var groupedThumbnails: [GroupState] = []
+    private var queuedGroupStates: [GroupState] = []
     private var rawThumbnails: [AssetThumbnail] = []
+    private var fetchResult: PHFetchResult<PHAsset>?
+    private var nextFetchIndex: Int = 0
+    private var thumbnailTargetSize: CGSize = CGSize(width: 240, height: 240)
+    private var isBufferReplenishmentInFlight: Bool = false
 
-    init(thumbnailCache: PhotoThumbnailCache = .shared,
+    init(thumbnailCache: PhotoThumbnailCache? = nil,
          fetchOptions: PHFetchOptions? = nil,
-         userDefaults: UserDefaults = .standard) {
-        self.thumbnailCache = thumbnailCache
+         userDefaults: UserDefaults = .standard,
+         retentionStore: PhotoRetentionStore? = nil) {
+        self.thumbnailCache = thumbnailCache ?? PhotoThumbnailCache.shared
         self.fetchOptions = fetchOptions ?? PhotoLibraryViewModel.defaultFetchOptions()
         self.userDefaults = userDefaults
+        self.retentionStore = retentionStore ?? PhotoRetentionStore.shared
         refreshAdvanceQuotaIfNeeded()
     }
 
@@ -140,43 +181,35 @@ final class PhotoLibraryViewModel: ObservableObject {
 
         isLoading = true
         didFinishInitialLoad = false
+        thumbnailTargetSize = targetSize
+
         defer { isLoading = false }
 
-        let fetchResult = PHAsset.fetchAssets(with: .image, options: fetchOptions)
-        guard fetchResult.count > 0 else {
-            reset()
+        let fetchedResults = PHAsset.fetchAssets(with: .image, options: fetchOptions)
+        fetchResult = fetchedResults
+        nextFetchIndex = 0
+        rawThumbnails.removeAll()
+        groupedThumbnails.removeAll()
+        queuedGroupStates.removeAll()
+        currentGroup.removeAll()
+        currentGroupIndex = 0
+        discoveredGroupCount = 0
+        upcomingBufferedGroupCount = 0
+
+        guard fetchedResults.count > 0 else {
             didFinishInitialLoad = true
             return
         }
 
-        var newThumbnails: [AssetThumbnail] = []
-        let upperBound = min(fetchResult.count, limit)
+        await fetchAdditionalThumbnailsIfNeeded(minUpcomingCount: Self.targetUpcomingGroupCount)
+        promoteQueuedGroupsIfNeeded(targetUpcoming: Self.targetUpcomingGroupCount)
 
-        for index in 0..<upperBound {
-            if Task.isCancelled { break }
-
-            let asset = fetchResult.object(at: index)
-            let result = await thumbnailCache.image(for: asset, targetSize: targetSize)
-
-            switch result {
-            case .success(let image):
-                guard let signature = PhotoSimilarityAnalyzer.makeSignature(from: image) else {
-                    continue
-                }
-                let thumbnail = AssetThumbnail(asset: asset, image: image, signature: signature)
-                newThumbnails.append(thumbnail)
-            case .failure:
-                continue
-            }
+        if !groupedThumbnails.isEmpty {
+            currentGroupIndex = min(currentGroupIndex, groupedThumbnails.count - 1)
+            presentGroup(at: currentGroupIndex)
+        } else {
+            currentGroup = []
         }
-
-        if !newThumbnails.isEmpty {
-            if !newThumbnails.contains(where: { $0.isChecked }) {
-                newThumbnails[0].isChecked = true
-            }
-        }
-
-        setRawThumbnails(newThumbnails)
 
         didFinishInitialLoad = true
     }
@@ -184,15 +217,27 @@ final class PhotoLibraryViewModel: ObservableObject {
     func reset() {
         rawThumbnails = []
         groupedThumbnails = []
+        queuedGroupStates = []
         currentGroup = []
         currentGroupIndex = 0
+        discoveredGroupCount = 0
+        upcomingBufferedGroupCount = 0
         didFinishInitialLoad = false
+    }
+
+    func resetRetainedFlags() async {
+        retentionStore.clear()
+        await loadThumbnails(targetSize: thumbnailTargetSize)
     }
 
     func toggleCheck(for assetIdentifier: String) {
         guard !currentGroup.isEmpty else { return }
         var updatedGroup = currentGroup
         guard let index = updatedGroup.firstIndex(where: { $0.id == assetIdentifier }) else { return }
+
+        if updatedGroup[index].isRetained && updatedGroup[index].isChecked {
+            return
+        }
 
         updatedGroup[index].isChecked.toggle()
         if updatedGroup[index].isChecked {
@@ -208,6 +253,10 @@ final class PhotoLibraryViewModel: ObservableObject {
         guard !currentGroup.isEmpty else { return }
         var updatedGroup = currentGroup
         guard let index = updatedGroup.firstIndex(where: { $0.id == assetIdentifier }) else { return }
+
+        if updatedGroup[index].isRetained && !isChecked {
+            return
+        }
 
         guard updatedGroup[index].isChecked != isChecked else { return }
 
@@ -257,7 +306,17 @@ final class PhotoLibraryViewModel: ObservableObject {
 
         do {
             let deletedCount = try await performDeletion(for: assets)
-            clearBucketAfterDeletion()
+            let identifiersToRemove = Set(groups.flatMap { $0.items.map(\.id) })
+            rawThumbnails.removeAll { identifiersToRemove.contains($0.id) }
+            rebuildGroupsFromRaw(resetGroupIndex: false)
+            promoteQueuedGroupsIfNeeded(targetUpcoming: Self.targetUpcomingGroupCount)
+            if !groupedThumbnails.isEmpty {
+                currentGroupIndex = min(currentGroupIndex, groupedThumbnails.count - 1)
+                presentGroup(at: currentGroupIndex)
+            } else {
+                currentGroup = []
+            }
+            updateBufferedCounts()
             return deletedCount
         } catch let error as DeletionError {
             throw error
@@ -302,43 +361,6 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
     }
 
-    func clearBucketAfterDeletion() {
-        let groups = bucketItemGroups
-        guard !groups.isEmpty else { return }
-
-        let identifiersToRemove = Set(groups.flatMap { $0.items.map(\.id) })
-        guard !identifiersToRemove.isEmpty else { return }
-
-        rawThumbnails.removeAll { identifiersToRemove.contains($0.id) }
-
-        for index in groupedThumbnails.indices {
-            var state = groupedThumbnails[index]
-            state.thumbnails.removeAll { identifiersToRemove.contains($0.id) }
-            if state.thumbnails.isEmpty {
-                state.isProcessed = false
-            } else {
-                ensureDefaultCheck(in: &state.thumbnails,
-                                   enforceChecked: false,
-                                   markBucketForDeletion: state.isProcessed)
-            }
-            groupedThumbnails[index] = state
-        }
-
-        groupedThumbnails.removeAll { $0.thumbnails.isEmpty }
-
-        guard !groupedThumbnails.isEmpty else {
-            currentGroup = []
-            currentGroupIndex = 0
-            return
-        }
-
-        if currentGroupIndex >= groupedThumbnails.count {
-            currentGroupIndex = max(0, groupedThumbnails.count - 1)
-        }
-
-        currentGroup = groupedThumbnails[currentGroupIndex].thumbnails
-    }
-
     @discardableResult
     func advanceToNextGroup(currentDate: Date = Date()) throws -> Bool {
         refreshAdvanceQuotaIfNeeded(currentDate: currentDate)
@@ -348,39 +370,80 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
 
         guard !groupedThumbnails.isEmpty else { return false }
-        finalizeCurrentGroup()
-        guard !groupedThumbnails.isEmpty else {
-            incrementAdvanceCount(currentDate: currentDate)
-            return true
-        }
 
-        let nextIndex = groupedThumbnails.isEmpty ? 0 : (currentGroupIndex + 1) % groupedThumbnails.count
-        currentGroupIndex = nextIndex
-        presentGroup(at: currentGroupIndex)
+        finalizeCurrentGroup()
         incrementAdvanceCount(currentDate: currentDate)
+        promoteQueuedGroupsIfNeeded(targetUpcoming: Self.targetUpcomingGroupCount)
+
+        let nextIndex = currentGroupIndex + 1
+        if groupedThumbnails.indices.contains(nextIndex) {
+            currentGroupIndex = nextIndex
+            presentGroup(at: currentGroupIndex)
+            requestBufferReplenishmentIfNeeded()
+            return true
+        } else {
+            requestBufferReplenishmentIfNeeded()
+            updateBufferedCounts()
+            return false
+        }
+    }
+
+    @discardableResult
+    func navigateToPreviousGroup() -> Bool {
+        guard hasPreviousGroup else { return false }
+        currentGroupIndex -= 1
+        presentGroup(at: currentGroupIndex)
         return true
+    }
+
+    @discardableResult
+    func navigateToNextDiscoveredGroup() -> Bool {
+        guard hasNextDiscoveredGroup else {
+            requestBufferReplenishmentIfNeeded()
+            return false
+        }
+        currentGroupIndex += 1
+        presentGroup(at: currentGroupIndex)
+        requestBufferReplenishmentIfNeeded()
+        return true
+    }
+
+    private func requestBufferReplenishmentIfNeeded() {
+        promoteQueuedGroupsIfNeeded(targetUpcoming: Self.targetUpcomingGroupCount)
+        updateBufferedCounts()
+
+        guard upcomingBufferedGroupCount < Self.bufferReplenishThreshold else { return }
+        guard (!queuedGroupStates.isEmpty) || (fetchResult != nil && nextFetchIndex < (fetchResult?.count ?? 0)) else { return }
+        guard !isBufferReplenishmentInFlight else { return }
+
+        isBufferReplenishmentInFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isBufferReplenishmentInFlight = false }
+            await self.fetchAdditionalThumbnailsIfNeeded(minUpcomingCount: Self.targetUpcomingGroupCount)
+            self.promoteQueuedGroupsIfNeeded(targetUpcoming: Self.targetUpcomingGroupCount)
+            if !self.groupedThumbnails.isEmpty {
+                self.currentGroupIndex = min(self.currentGroupIndex, self.groupedThumbnails.count - 1)
+                self.presentGroup(at: self.currentGroupIndex)
+            }
+            self.updateBufferedCounts()
+        }
     }
 
     private func presentGroup(at index: Int) {
         guard groupedThumbnails.indices.contains(index) else {
             currentGroup = []
+            updateBufferedCounts()
             return
         }
 
         var state = groupedThumbnails[index]
-
-        if !state.isProcessed {
-            ensureDefaultCheck(in: &state.thumbnails,
-                               enforceChecked: false,
-                               markBucketForDeletion: false)
-        } else {
-            ensureDefaultCheck(in: &state.thumbnails,
-                               enforceChecked: false,
-                               markBucketForDeletion: true)
-        }
-
+        ensureDefaultCheck(in: &state.thumbnails,
+                           enforceChecked: !state.thumbnails.contains { $0.isChecked },
+                           markBucketForDeletion: state.isProcessed)
         groupedThumbnails[index] = state
         currentGroup = state.thumbnails
+        updateBufferedCounts()
     }
 
     private func finalizeCurrentGroup() {
@@ -390,12 +453,15 @@ final class PhotoLibraryViewModel: ObservableObject {
         guard !state.thumbnails.isEmpty else { return }
 
         state.thumbnails = currentGroup
+        markRetainedAssets(in: &state.thumbnails)
         ensureDefaultCheck(in: &state.thumbnails,
                            enforceChecked: false,
                            markBucketForDeletion: true)
         state.isProcessed = true
         groupedThumbnails[currentGroupIndex] = state
         currentGroup = state.thumbnails
+        synchronizeRetentionFlags(with: state.thumbnails)
+        updateBufferedCounts()
     }
 
     nonisolated private static func defaultFetchOptions() -> PHFetchOptions {
@@ -406,39 +472,176 @@ final class PhotoLibraryViewModel: ObservableObject {
         return options
     }
 
-    private func setRawThumbnails(_ thumbnails: [AssetThumbnail]) {
-        rawThumbnails = thumbnails
-        regroupThumbnailsFromRaw(resetGroupIndex: true)
+    private func fetchAdditionalThumbnailsIfNeeded(minUpcomingCount: Int) async {
+        promoteQueuedGroupsIfNeeded(targetUpcoming: minUpcomingCount)
+        updateBufferedCounts()
+
+        guard let fetchResult else { return }
+
+        while upcomingBufferedGroupCount < minUpcomingCount && nextFetchIndex < fetchResult.count {
+            let batchSize = groupedThumbnails.isEmpty ? Self.initialFetchBatchSize : Self.subsequentFetchBatchSize
+            let didFetch = await fetchNextBatch(batchSize: batchSize)
+            promoteQueuedGroupsIfNeeded(targetUpcoming: minUpcomingCount)
+            updateBufferedCounts()
+            if !didFetch { break }
+        }
+
+        if !groupedThumbnails.isEmpty {
+            currentGroupIndex = min(currentGroupIndex, groupedThumbnails.count - 1)
+            presentGroup(at: currentGroupIndex)
+        }
     }
 
-    private func regroupThumbnailsFromRaw(resetGroupIndex: Bool) {
-        guard !rawThumbnails.isEmpty else {
+    private func fetchNextBatch(batchSize: Int) async -> Bool {
+        guard let fetchResult else { return false }
+        guard nextFetchIndex < fetchResult.count else { return false }
+
+        isExploringGroups = true
+        defer { isExploringGroups = false }
+
+        var addedThumbnails: [AssetThumbnail] = []
+        let batchEnd = min(nextFetchIndex + batchSize, fetchResult.count)
+
+        for index in nextFetchIndex..<batchEnd {
+            if Task.isCancelled { break }
+            let asset = fetchResult.object(at: index)
+            let result = await thumbnailCache.image(for: asset, targetSize: thumbnailTargetSize)
+
+            switch result {
+            case .success(let image):
+                guard let signature = PhotoSimilarityAnalyzer.makeSignature(from: image) else { continue }
+                var thumbnail = AssetThumbnail(asset: asset, image: image, signature: signature)
+                thumbnail.isRetained = retentionStore.isRetained(identifier: thumbnail.id)
+                addedThumbnails.append(thumbnail)
+            case .failure:
+                continue
+            }
+        }
+
+        nextFetchIndex = batchEnd
+
+        guard !addedThumbnails.isEmpty else { return false }
+
+        rawThumbnails.append(contentsOf: addedThumbnails)
+        rebuildGroupsFromRaw(resetGroupIndex: groupedThumbnails.isEmpty)
+        return true
+    }
+
+    private func rebuildGroupsFromRaw(resetGroupIndex: Bool) {
+        if rawThumbnails.isEmpty {
             groupedThumbnails = []
+            queuedGroupStates = []
             currentGroup = []
             currentGroupIndex = 0
+            updateDiscoveredGroupCount()
+            updateBufferedCounts()
             return
+        }
+
+        let previousGroups = groupedThumbnails + queuedGroupStates
+        let previousDiscoveredCount = groupedThumbnails.count
+        let previousCurrentIDSet = Set(currentGroup.map(\.id))
+        let previousCurrentIndex = currentGroupIndex
+
+        var assetSnapshots: [String: AssetSnapshot] = [:]
+        var processedStatusByKey: [String: Bool] = [:]
+
+        for state in previousGroups {
+            processedStatusByKey[state.identifierKey] = state.isProcessed
+            for item in state.thumbnails {
+                assetSnapshots[item.id] = AssetSnapshot(isChecked: item.isChecked,
+                                                         isInBucket: item.isInBucket,
+                                                         isBest: item.isBest,
+                                                         isRetained: item.isRetained)
+            }
         }
 
         let grouped = groupThumbnails(rawThumbnails)
-        groupedThumbnails = grouped.map { group in
+        var assembledStates: [GroupState] = []
+        assembledStates.reserveCapacity(grouped.count)
+
+        for group in grouped {
             var thumbnails = group
+            var hadSnapshot = false
+
+            for index in thumbnails.indices {
+                if let snapshot = assetSnapshots[thumbnails[index].id] {
+                    thumbnails[index].isChecked = snapshot.isChecked
+                    thumbnails[index].isInBucket = snapshot.isInBucket
+                    thumbnails[index].isBest = snapshot.isBest
+                    thumbnails[index].isRetained = snapshot.isRetained
+                    hadSnapshot = true
+                }
+            }
+
+            applyRetentionStoreState(to: &thumbnails)
+
+            let key = thumbnails.map(\.id).sorted().joined(separator: "|")
+            let wasProcessed = processedStatusByKey[key] ?? false
+
             ensureDefaultCheck(in: &thumbnails,
-                               enforceChecked: true,
-                               markBucketForDeletion: false)
-            return GroupState(thumbnails: thumbnails, isProcessed: false)
+                               enforceChecked: !hadSnapshot,
+                               markBucketForDeletion: wasProcessed)
+
+            assembledStates.append(GroupState(thumbnails: thumbnails, isProcessed: wasProcessed))
         }
 
+        let minimumDiscovered = resetGroupIndex ? 1 : max(previousDiscoveredCount, 0)
+        let requiredForCurrent = min(previousCurrentIndex + 1, assembledStates.count)
+        let discoveredCount = min(max(minimumDiscovered, requiredForCurrent), assembledStates.count)
+
+        groupedThumbnails = Array(assembledStates.prefix(discoveredCount))
+        queuedGroupStates = Array(assembledStates.dropFirst(discoveredCount))
+
+        if resetGroupIndex {
+            currentGroupIndex = groupedThumbnails.isEmpty ? 0 : 0
+        }
+
+        if !previousCurrentIDSet.isEmpty,
+           let index = groupedThumbnails.firstIndex(where: { $0.idSet == previousCurrentIDSet }) {
+            currentGroupIndex = index
+        } else if groupedThumbnails.indices.contains(previousCurrentIndex) {
+            currentGroupIndex = previousCurrentIndex
+        } else {
+            currentGroupIndex = max(0, groupedThumbnails.count - 1)
+        }
+
+        updateDiscoveredGroupCount()
+        updateBufferedCounts()
+    }
+
+    private func promoteQueuedGroupsIfNeeded(targetUpcoming: Int) {
+        var didMutate = false
+
+        if groupedThumbnails.isEmpty, let first = queuedGroupStates.first {
+            groupedThumbnails.append(first)
+            queuedGroupStates.removeFirst()
+            didMutate = true
+        }
+
+        while groupedThumbnails.count > 0 &&
+                max(0, groupedThumbnails.count - currentGroupIndex - 1) < targetUpcoming,
+              let next = queuedGroupStates.first {
+            groupedThumbnails.append(next)
+            queuedGroupStates.removeFirst()
+            didMutate = true
+        }
+
+        if didMutate {
+            updateDiscoveredGroupCount()
+        }
+    }
+
+    private func updateDiscoveredGroupCount() {
+        discoveredGroupCount = groupedThumbnails.count
+    }
+
+    private func updateBufferedCounts() {
         if groupedThumbnails.isEmpty {
-            currentGroup = []
-            currentGroupIndex = 0
-            return
+            upcomingBufferedGroupCount = 0
+        } else {
+            upcomingBufferedGroupCount = max(0, groupedThumbnails.count - currentGroupIndex - 1)
         }
-
-        if resetGroupIndex || currentGroupIndex >= groupedThumbnails.count {
-            currentGroupIndex = 0
-        }
-
-        presentGroup(at: currentGroupIndex)
     }
 
     private func ensureDefaultCheck(in group: inout [AssetThumbnail],
@@ -466,6 +669,36 @@ final class PhotoLibraryViewModel: ObservableObject {
         for index in group.indices {
             if markBucketForDeletion {
                 group[index].isInBucket = !group[index].isChecked
+            }
+        }
+    }
+
+    private func markRetainedAssets(in group: inout [AssetThumbnail]) {
+        let checkedItems = group.filter { $0.isChecked }
+        guard !checkedItems.isEmpty else { return }
+
+        let identifiers = checkedItems.map(\.id)
+        let identifierSet = Set(identifiers)
+        let signatures = Dictionary(uniqueKeysWithValues: checkedItems.map { ($0.id, $0.signature) })
+        retentionStore.markRetained(identifiers: identifiers, signatures: signatures)
+
+        for index in group.indices where identifierSet.contains(group[index].id) {
+            group[index].isRetained = true
+        }
+    }
+
+    private func synchronizeRetentionFlags(with thumbnails: [AssetThumbnail]) {
+        for item in thumbnails {
+            if let rawIndex = rawThumbnails.firstIndex(where: { $0.id == item.id }) {
+                rawThumbnails[rawIndex].isRetained = item.isRetained
+            }
+        }
+    }
+
+    private func applyRetentionStoreState(to thumbnails: inout [AssetThumbnail]) {
+        for index in thumbnails.indices {
+            if retentionStore.isRetained(identifier: thumbnails[index].id) {
+                thumbnails[index].isRetained = true
             }
         }
     }
@@ -519,6 +752,10 @@ final class PhotoLibraryViewModel: ObservableObject {
             }
 
             if group.count > 1 {
+                if group.allSatisfy({ $0.isRetained }) {
+                    continue
+                }
+
                 group.sort { lhs, rhs in
                     let lhsDate = lhs.asset.creationDate ?? .distantPast
                     let rhsDate = rhs.asset.creationDate ?? .distantPast

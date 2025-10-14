@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Photos
 import UIKit
 
@@ -6,6 +7,20 @@ enum PhotoThumbnailCacheError: Error {
     case imageUnavailable
     case requestCancelled
     case underlying(Error)
+}
+
+private final class RequestIDBox: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: PHInvalidImageRequestID)
+
+    nonisolated func set(_ id: PHImageRequestID) {
+        lock.withLock { state in
+            state = id
+        }
+    }
+
+    nonisolated func value() -> PHImageRequestID {
+        lock.withLock { $0 }
+    }
 }
 
 final class PhotoThumbnailCache {
@@ -39,14 +54,14 @@ final class PhotoThumbnailCache {
             return .success(cachedImage)
         }
 
-        var requestID: PHImageRequestID = PHInvalidImageRequestID
+        let requestIDStore = RequestIDBox()
 
         return await withTaskCancellationHandler(operation: {
             await withCheckedContinuation { continuation in
-                requestID = imageManager.requestImage(for: asset,
-                                                      targetSize: targetSize,
-                                                      contentMode: contentMode,
-                                                      options: requestOptions) { [weak self] image, info in
+                let requestID = imageManager.requestImage(for: asset,
+                                                          targetSize: targetSize,
+                                                          contentMode: contentMode,
+                                                          options: requestOptions) { [weak self] image, info in
                     guard let self = self else { return }
 
                     guard let info = info else {
@@ -78,8 +93,10 @@ final class PhotoThumbnailCache {
                         continuation.resume(returning: .failure(.imageUnavailable))
                     }
                 }
+                requestIDStore.set(requestID)
             }
         }, onCancel: {
+            let requestID = requestIDStore.value()
             if requestID != PHInvalidImageRequestID {
                 imageManager.cancelImageRequest(requestID)
             }
