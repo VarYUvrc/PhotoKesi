@@ -96,7 +96,7 @@ private extension ContentView {
         } catch let error as PhotoLibraryViewModel.GroupAdvanceError {
             alertContext = MessageAlertContext(
                 title: "本日の上限に達しました",
-                message: error.errorDescription ?? "無料プランの上限に達しました。翌日0:00にリセットされます。",
+                message: error.message,
                 allowsUpgradeAction: true
             )
         } catch {
@@ -124,12 +124,6 @@ private extension ContentView {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
 
-                NavigationLink(isActive: $shouldNavigateToSettings) {
-                    SettingsView(libraryViewModel: libraryViewModel)
-                } label: {
-                    EmptyView()
-                }
-                .hidden()
             }
             .navigationTitle(currentModeTitle)
             .navigationBarTitleDisplayMode(.inline)
@@ -142,6 +136,9 @@ private extension ContentView {
                     }
                     .accessibilityLabel("設定を開く")
                 }
+            }
+            .navigationDestination(isPresented: $shouldNavigateToSettings) {
+                SettingsView(libraryViewModel: libraryViewModel)
             }
         }
         .background(LiquidGlassBackdrop().ignoresSafeArea())
@@ -166,7 +163,7 @@ private extension ContentView {
                 }
             )
         }
-        .onChange(of: libraryViewModel.currentGroup) { newGroup in
+        .onChange(of: libraryViewModel.currentGroup) { _, newGroup in
             guard !newGroup.isEmpty else {
                 isFullScreenPresented = false
                 viewerSelectionIndex = 0
@@ -194,7 +191,7 @@ private extension ContentView {
                 )
             }
         }
-        .onChange(of: scenePhase) { phase in
+        .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 libraryViewModel.refreshAdvanceQuotaIfNeeded()
             }
@@ -715,7 +712,7 @@ private struct FullScreenPhotoViewer: View {
                     }
                 }
         )
-        .onChange(of: thumbnails) { newValue in
+        .onChange(of: thumbnails) { _, newValue in
             if selectedIndex >= newValue.count {
                 selectedIndex = max(0, newValue.count - 1)
             }
@@ -726,7 +723,7 @@ private struct FullScreenPhotoViewer: View {
             synchronizeZoomLevels(with: thumbnails)
             prefetchHighResolutionImages(around: selectedIndex)
         }
-        .onChange(of: selectedIndex) { newValue in
+        .onChange(of: selectedIndex) { _, newValue in
             resetZoom(for: thumbnails, at: newValue)
             prefetchHighResolutionImages(around: newValue)
         }

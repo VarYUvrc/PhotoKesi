@@ -25,16 +25,17 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
     }
 
-    enum GroupAdvanceError: LocalizedError {
+    enum GroupAdvanceError: Error {
         case quotaExceeded
 
-        var errorDescription: String? {
+        var message: String {
             switch self {
             case .quotaExceeded:
                 return "本日の仕分け上限（\(PhotoLibraryViewModel.dailyAdvanceLimit)回）に達しました。明日0:00以降に再度お試しください。"
             }
         }
     }
+
 
     struct AssetThumbnail: Identifiable, Equatable {
         let asset: PHAsset
@@ -89,7 +90,7 @@ final class PhotoLibraryViewModel: ObservableObject {
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var currentGroupIndex: Int = 0
     @Published private(set) var didFinishInitialLoad: Bool = false
-    @Published private(set) var remainingAdvanceQuota: Int = PhotoLibraryViewModel.dailyAdvanceLimit
+    @Published private(set) var remainingAdvanceQuota: Int = 0
     @Published private(set) var advancesPerformedToday: Int = 0
     @Published private(set) var discoveredGroupCount: Int = 0
     @Published private(set) var upcomingBufferedGroupCount: Int = 0
@@ -140,7 +141,7 @@ final class PhotoLibraryViewModel: ObservableObject {
 
     static let minGroupingMinutes = 15
     static let maxGroupingMinutes = 240
-    static let dailyAdvanceLimit = 3
+    nonisolated static let dailyAdvanceLimit = 3
     private static let perceptualHashThreshold = 12
     private static let differenceHashThreshold = 18
     private static let advanceCountKey = "PhotoLibraryViewModel.dailyAdvanceCount"
@@ -163,14 +164,14 @@ final class PhotoLibraryViewModel: ObservableObject {
     private var thumbnailTargetSize: CGSize = CGSize(width: 240, height: 240)
     private var isBufferReplenishmentInFlight: Bool = false
 
-    init(thumbnailCache: PhotoThumbnailCache = .shared,
+    init(thumbnailCache: PhotoThumbnailCache? = nil,
          fetchOptions: PHFetchOptions? = nil,
          userDefaults: UserDefaults = .standard,
-         retentionStore: PhotoRetentionStore = .shared) {
-        self.thumbnailCache = thumbnailCache
+         retentionStore: PhotoRetentionStore? = nil) {
+        self.thumbnailCache = thumbnailCache ?? PhotoThumbnailCache.shared
         self.fetchOptions = fetchOptions ?? PhotoLibraryViewModel.defaultFetchOptions()
         self.userDefaults = userDefaults
-        self.retentionStore = retentionStore
+        self.retentionStore = retentionStore ?? PhotoRetentionStore.shared
         refreshAdvanceQuotaIfNeeded()
     }
 
