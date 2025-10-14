@@ -206,4 +206,12 @@ Free と MAX を**表形式**で並べ、丸×で出来ること／出来ない�
 * 拡張時の追加ジェスチャーが必要になった場合も、`UIGestureRecognizerRepresentable` など UIKit ベースの橋渡しを優先し、SwiftUI カスタムジェスチャーの多重合成は避ける。
 * ユーザー向けテキストは常に直感的な言い回しを優先し、デバッグ用語（例：チェック状態、バケツなど内部用語のみの羅列）で終わらせない。UI変更時は README と実装を同時に更新する。
 
+### ビルドテスト
+
+XCodeを使わずに下記の方法でビルドが通るか簡易的に確認できます。
+
+1. `bash scripts/ios_build_check.sh --project "PhotoKesi.xcodeproj"`をターミナルで実行
+2. ビルド完了まで少し待つ
+3. `.build/build.json`（LLM向け）または`.build/build_issues.txt`（人間用）を確認してビルドの成否とエラー内容を確認する
+
 ---
