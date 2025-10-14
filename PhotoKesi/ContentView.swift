@@ -439,9 +439,9 @@ private struct PhotoGroupBoard: View {
                                 onSwipeDown: {
                                     onSetCheck(item.thumbnail.id, false)
                                 },
-                                isToggleDisabled: false,
-                                allowSwipeUp: !isUpperRow,
-                                allowSwipeDown: isUpperRow
+                                isToggleDisabled: item.thumbnail.isRetained,
+                                allowSwipeUp: !isUpperRow && !item.thumbnail.isRetained,
+                                allowSwipeDown: isUpperRow && !item.thumbnail.isRetained
                             )
                         }
                     }
@@ -690,7 +690,7 @@ private struct FullScreenPhotoViewer: View {
                     if let current = thumbnails[safe: selectedIndex] {
                         CheckBadgeButton(
                             isChecked: current.isChecked,
-                            isDisabled: false,
+                            isDisabled: current.isRetained,
                             action: {
                                 onToggleCheck(current.id)
                             }

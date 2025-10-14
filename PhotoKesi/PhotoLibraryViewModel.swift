@@ -43,6 +43,7 @@ final class PhotoLibraryViewModel: ObservableObject {
         var isChecked: Bool = false
         var isInBucket: Bool = false
         var isBest: Bool = false
+        var isRetained: Bool = false
 
         var id: String { asset.localIdentifier }
         var sharpnessScore: Double { signature.sharpnessScore }
@@ -52,6 +53,7 @@ final class PhotoLibraryViewModel: ObservableObject {
             && lhs.isChecked == rhs.isChecked
             && lhs.isInBucket == rhs.isInBucket
             && lhs.isBest == rhs.isBest
+            && lhs.isRetained == rhs.isRetained
         }
     }
 
@@ -80,6 +82,7 @@ final class PhotoLibraryViewModel: ObservableObject {
         let isChecked: Bool
         let isInBucket: Bool
         let isBest: Bool
+        let isRetained: Bool
     }
 
     @Published private(set) var currentGroup: [AssetThumbnail] = []
@@ -150,6 +153,7 @@ final class PhotoLibraryViewModel: ObservableObject {
     private let thumbnailCache: PhotoThumbnailCache
     private let fetchOptions: PHFetchOptions
     private let userDefaults: UserDefaults
+    private let retentionStore: PhotoRetentionStore
 
     private var groupedThumbnails: [GroupState] = []
     private var queuedGroupStates: [GroupState] = []
@@ -161,10 +165,12 @@ final class PhotoLibraryViewModel: ObservableObject {
 
     init(thumbnailCache: PhotoThumbnailCache = .shared,
          fetchOptions: PHFetchOptions? = nil,
-         userDefaults: UserDefaults = .standard) {
+         userDefaults: UserDefaults = .standard,
+         retentionStore: PhotoRetentionStore = .shared) {
         self.thumbnailCache = thumbnailCache
         self.fetchOptions = fetchOptions ?? PhotoLibraryViewModel.defaultFetchOptions()
         self.userDefaults = userDefaults
+        self.retentionStore = retentionStore
         refreshAdvanceQuotaIfNeeded()
     }
 
@@ -218,10 +224,19 @@ final class PhotoLibraryViewModel: ObservableObject {
         didFinishInitialLoad = false
     }
 
+    func resetRetainedFlags() async {
+        retentionStore.clear()
+        await loadThumbnails(targetSize: thumbnailTargetSize)
+    }
+
     func toggleCheck(for assetIdentifier: String) {
         guard !currentGroup.isEmpty else { return }
         var updatedGroup = currentGroup
         guard let index = updatedGroup.firstIndex(where: { $0.id == assetIdentifier }) else { return }
+
+        if updatedGroup[index].isRetained && updatedGroup[index].isChecked {
+            return
+        }
 
         updatedGroup[index].isChecked.toggle()
         if updatedGroup[index].isChecked {
@@ -237,6 +252,10 @@ final class PhotoLibraryViewModel: ObservableObject {
         guard !currentGroup.isEmpty else { return }
         var updatedGroup = currentGroup
         guard let index = updatedGroup.firstIndex(where: { $0.id == assetIdentifier }) else { return }
+
+        if updatedGroup[index].isRetained && !isChecked {
+            return
+        }
 
         guard updatedGroup[index].isChecked != isChecked else { return }
 
@@ -433,12 +452,14 @@ final class PhotoLibraryViewModel: ObservableObject {
         guard !state.thumbnails.isEmpty else { return }
 
         state.thumbnails = currentGroup
+        markRetainedAssets(in: &state.thumbnails)
         ensureDefaultCheck(in: &state.thumbnails,
                            enforceChecked: false,
                            markBucketForDeletion: true)
         state.isProcessed = true
         groupedThumbnails[currentGroupIndex] = state
         currentGroup = state.thumbnails
+        synchronizeRetentionFlags(with: state.thumbnails)
         updateBufferedCounts()
     }
 
@@ -488,7 +509,9 @@ final class PhotoLibraryViewModel: ObservableObject {
             switch result {
             case .success(let image):
                 guard let signature = PhotoSimilarityAnalyzer.makeSignature(from: image) else { continue }
-                addedThumbnails.append(AssetThumbnail(asset: asset, image: image, signature: signature))
+                var thumbnail = AssetThumbnail(asset: asset, image: image, signature: signature)
+                thumbnail.isRetained = retentionStore.isRetained(identifier: thumbnail.id)
+                addedThumbnails.append(thumbnail)
             case .failure:
                 continue
             }
@@ -527,7 +550,8 @@ final class PhotoLibraryViewModel: ObservableObject {
             for item in state.thumbnails {
                 assetSnapshots[item.id] = AssetSnapshot(isChecked: item.isChecked,
                                                          isInBucket: item.isInBucket,
-                                                         isBest: item.isBest)
+                                                         isBest: item.isBest,
+                                                         isRetained: item.isRetained)
             }
         }
 
@@ -544,9 +568,12 @@ final class PhotoLibraryViewModel: ObservableObject {
                     thumbnails[index].isChecked = snapshot.isChecked
                     thumbnails[index].isInBucket = snapshot.isInBucket
                     thumbnails[index].isBest = snapshot.isBest
+                    thumbnails[index].isRetained = snapshot.isRetained
                     hadSnapshot = true
                 }
             }
+
+            applyRetentionStoreState(to: &thumbnails)
 
             let key = thumbnails.map(\.id).sorted().joined(separator: "|")
             let wasProcessed = processedStatusByKey[key] ?? false
@@ -645,6 +672,36 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
     }
 
+    private func markRetainedAssets(in group: inout [AssetThumbnail]) {
+        let checkedItems = group.filter { $0.isChecked }
+        guard !checkedItems.isEmpty else { return }
+
+        let identifiers = checkedItems.map(\.id)
+        let identifierSet = Set(identifiers)
+        let signatures = Dictionary(uniqueKeysWithValues: checkedItems.map { ($0.id, $0.signature) })
+        retentionStore.markRetained(identifiers: identifiers, signatures: signatures)
+
+        for index in group.indices where identifierSet.contains(group[index].id) {
+            group[index].isRetained = true
+        }
+    }
+
+    private func synchronizeRetentionFlags(with thumbnails: [AssetThumbnail]) {
+        for item in thumbnails {
+            if let rawIndex = rawThumbnails.firstIndex(where: { $0.id == item.id }) {
+                rawThumbnails[rawIndex].isRetained = item.isRetained
+            }
+        }
+    }
+
+    private func applyRetentionStoreState(to thumbnails: inout [AssetThumbnail]) {
+        for index in thumbnails.indices {
+            if retentionStore.isRetained(identifier: thumbnails[index].id) {
+                thumbnails[index].isRetained = true
+            }
+        }
+    }
+
     private func applyUpdatedCurrentGroup(_ updatedGroup: [AssetThumbnail]) {
         var normalizedGroup = updatedGroup
         ensureDefaultCheck(in: &normalizedGroup,
@@ -694,6 +751,10 @@ final class PhotoLibraryViewModel: ObservableObject {
             }
 
             if group.count > 1 {
+                if group.allSatisfy({ $0.isRetained }) {
+                    continue
+                }
+
                 group.sort { lhs, rhs in
                     let lhsDate = lhs.asset.creationDate ?? .distantPast
                     let rhsDate = rhs.asset.creationDate ?? .distantPast
