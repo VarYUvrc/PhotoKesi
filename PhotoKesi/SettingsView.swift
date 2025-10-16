@@ -5,6 +5,8 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isRetentionResetAlertPresented = false
     @State private var isResettingRetentionFlags = false
+    @State private var isDebugTuningExpanded = false
+    @State private var isRescanningGroups = false
 
     private let stepMinutes = 15
     private let minMinutes = PhotoLibraryViewModel.minGroupingMinutes
@@ -48,6 +50,12 @@ struct SettingsView: View {
                         Text("カラーパレット設定（ダミー）")
                             .font(.footnote.weight(.semibold))
                         paletteCard
+                    }
+
+                    Group {
+                        Text("デバッグ：類似判定チューニング")
+                            .font(.footnote.weight(.semibold))
+                        debugSimilarityCard
                     }
                 }
             }
@@ -198,6 +206,107 @@ struct SettingsView: View {
     private var paletteCard: some View {
         settingsInnerBackground(Color(uiColor: .secondarySystemGroupedBackground)) {
             colorPaletteSection()
+        }
+    }
+
+    private var debugSimilarityCard: some View {
+        let tuning = libraryViewModel.debugSimilarityTuning
+        let isCustomized = tuning != PhotoLibraryViewModel.SimilarityTuning()
+
+        return settingsInnerBackground(Color(uiColor: .secondarySystemGroupedBackground)) {
+            DisclosureGroup(isExpanded: $isDebugTuningExpanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("判定プリセット", selection: $libraryViewModel.selectedPreset) {
+                        ForEach(PhotoLibraryViewModel.SimilarityPreset.allCases) { preset in
+                            Text(preset.displayName).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Stepper(value: tuningBinding(\.hashSoftOffset), in: -8...8) {
+                        Text("ハッシュ閾値（ソフト）: \(formattedSigned(value: tuning.hashSoftOffset))")
+                            .font(.footnote)
+                    }
+
+                    Stepper(value: tuningBinding(\.hashHardOffset), in: -8...8) {
+                        Text("ハッシュ閾値（ハード）: \(formattedSigned(value: tuning.hashHardOffset))")
+                            .font(.footnote)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("ヒストグラム許容倍率: \(formattedScale(tuning.histogramScale))")
+                            .font(.footnote)
+                        Slider(value: tuningBinding(\.histogramScale), in: 0.5...1.5, step: 0.05)
+                            .accessibilityLabel("ヒストグラム許容倍率")
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("エッジ許容倍率: \(formattedScale(tuning.edgeScale))")
+                            .font(.footnote)
+                        Slider(value: tuningBinding(\.edgeScale), in: 0.5...1.5, step: 0.05)
+                            .accessibilityLabel("エッジ許容倍率")
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("エッジ密度許容倍率: \(formattedScale(tuning.edgeDensityScale))")
+                            .font(.footnote)
+                        Slider(value: tuningBinding(\.edgeDensityScale), in: 0.5...1.5, step: 0.05)
+                            .accessibilityLabel("エッジ密度許容倍率")
+                    }
+
+                    Divider()
+
+                    Button {
+                        guard !isRescanningGroups else { return }
+                        isRescanningGroups = true
+                        Task {
+                            await libraryViewModel.reprocessAllGroupsFromStart()
+                            await MainActor.run {
+                                isRescanningGroups = false
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            if isRescanningGroups || libraryViewModel.isLoading {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                            }
+                            Image(systemName: "gobackward")
+                            Text("全グループを再探索")
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isRescanningGroups || libraryViewModel.isLoading)
+
+                    Button {
+                        libraryViewModel.resetSimilarityTuning()
+                    } label: {
+                        HStack {
+                            Image(systemName: "arrow.uturn.backward")
+                            Text("デフォルトに戻す")
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!isCustomized)
+
+                    Text("調整後に「全グループを再探索」を押すと、現在の設定で最初からグルーピングをやり直せます。デフォルトに戻すとチューニング値のみリセットされます。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } label: {
+                HStack {
+                    Text("現在のしきい値調整")
+                        .font(.footnote)
+                    Spacer()
+                    Text(isCustomized ? "調整中" : "標準")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isCustomized ? Color.orange : Color.secondary)
+                }
+            }
         }
     }
 
@@ -360,5 +469,22 @@ struct SettingsView: View {
         }
         .frame(minWidth: 86)
         .opacity(isLocked ? 0.6 : 1.0)
+    }
+
+    private func tuningBinding<Value>(_ keyPath: WritableKeyPath<PhotoLibraryViewModel.SimilarityTuning, Value>) -> Binding<Value> {
+        Binding(
+            get: { libraryViewModel.debugSimilarityTuning[keyPath: keyPath] },
+            set: { newValue in
+                libraryViewModel.updateSimilarityTuning(keyPath, to: newValue)
+            }
+        )
+    }
+
+    private func formattedSigned(value: Int) -> String {
+        String(format: "%+d", value)
+    }
+
+    private func formattedScale(_ value: Double) -> String {
+        String(format: "%.2f×", value)
     }
 }

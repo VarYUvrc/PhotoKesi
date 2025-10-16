@@ -86,6 +86,134 @@ final class PhotoLibraryViewModel: ObservableObject {
         let isRetained: Bool
     }
 
+    private enum SceneProfile {
+        case selfie
+        case people
+        case food
+        case landscape
+        case generic
+    }
+
+    private struct SimilarityThresholds {
+        let averageSoft: Int
+        let averageHard: Int
+        let differenceSoft: Int
+        let differenceHard: Int
+        let perceptualSoft: Int
+        let perceptualHard: Int
+        let labThreshold: Float
+        let edgeThreshold: Float
+        let edgeDensityTolerance: Float
+
+        func applying(_ tuning: SimilarityTuning) -> SimilarityThresholds {
+            let clampDouble: (Double, Double, Double) -> Double = { value, lower, upper in
+                min(max(value, lower), upper)
+            }
+
+            let hashSoftOffset = tuning.hashSoftOffset
+            let hashHardOffset = tuning.hashHardOffset
+
+            let adjustedAverageSoft = max(0, averageSoft + hashSoftOffset)
+            let adjustedDifferenceSoft = max(0, differenceSoft + hashSoftOffset)
+            let adjustedPerceptualSoft = max(0, perceptualSoft + hashSoftOffset)
+
+            let avgHardRaw = max(0, averageHard + hashHardOffset)
+            let diffHardRaw = max(0, differenceHard + hashHardOffset)
+            let percHardRaw = max(0, perceptualHard + hashHardOffset)
+
+            let adjustedAverageHard = max(adjustedAverageSoft, avgHardRaw)
+            let adjustedDifferenceHard = max(adjustedDifferenceSoft, diffHardRaw)
+            let adjustedPerceptualHard = max(adjustedPerceptualSoft, percHardRaw)
+
+            let histogramScale = clampDouble(tuning.histogramScale, 0.3, 2.0)
+            let edgeScale = clampDouble(tuning.edgeScale, 0.3, 2.0)
+            let edgeDensityScale = clampDouble(tuning.edgeDensityScale, 0.3, 2.0)
+
+            let adjustedLabThreshold = min(1.0, max(0.05, labThreshold * Float(histogramScale)))
+            let adjustedEdgeThreshold = min(1.0, max(0.05, edgeThreshold * Float(edgeScale)))
+            let adjustedEdgeDensity = min(1.0, max(0.05, edgeDensityTolerance * Float(edgeDensityScale)))
+
+            return SimilarityThresholds(
+                averageSoft: adjustedAverageSoft,
+                averageHard: adjustedAverageHard,
+                differenceSoft: adjustedDifferenceSoft,
+                differenceHard: adjustedDifferenceHard,
+                perceptualSoft: adjustedPerceptualSoft,
+                perceptualHard: adjustedPerceptualHard,
+                labThreshold: adjustedLabThreshold,
+                edgeThreshold: adjustedEdgeThreshold,
+                edgeDensityTolerance: adjustedEdgeDensity
+            )
+        }
+    }
+
+    struct SimilarityTuning: Equatable {
+        var hashSoftOffset: Int = 0
+        var hashHardOffset: Int = 0
+        var histogramScale: Double = 1.0
+        var edgeScale: Double = 1.0
+        var edgeDensityScale: Double = 1.0
+    }
+
+    enum SimilarityPreset: String, CaseIterable, Identifiable {
+        case standard
+        case strict
+        case extraStrict
+        case loose
+        case extraLoose
+
+        var id: Self { self }
+
+        var displayName: String {
+            switch self {
+            case .standard: return "標準"
+            case .strict: return "厳密"
+            case .extraStrict: return "さらに厳密"
+            case .loose: return "ゆるい"
+            case .extraLoose: return "さらにゆるい"
+            }
+        }
+
+        var tuning: SimilarityTuning {
+            switch self {
+            case .standard:
+                return SimilarityTuning()
+            case .strict:
+                return SimilarityTuning(
+                    hashSoftOffset: -2,
+                    hashHardOffset: -2,
+                    histogramScale: 0.9,
+                    edgeScale: 0.9,
+                    edgeDensityScale: 0.9
+                )
+            case .extraStrict:
+                return SimilarityTuning(
+                    hashSoftOffset: -4,
+                    hashHardOffset: -4,
+                    histogramScale: 0.8,
+                    edgeScale: 0.85,
+                    edgeDensityScale: 0.85
+                )
+            case .loose:
+                return SimilarityTuning(
+                    hashSoftOffset: 2,
+                    hashHardOffset: 2,
+                    histogramScale: 1.1,
+                    edgeScale: 1.1,
+                    edgeDensityScale: 1.1
+                )
+            case .extraLoose:
+                return SimilarityTuning(
+                    hashSoftOffset: 4,
+                    hashHardOffset: 4,
+                    histogramScale: 1.2,
+                    edgeScale: 1.2,
+                    edgeDensityScale: 1.2
+                )
+            }
+        }
+    }
+
     @Published private(set) var currentGroup: [AssetThumbnail] = []
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var currentGroupIndex: Int = 0
@@ -95,6 +223,13 @@ final class PhotoLibraryViewModel: ObservableObject {
     @Published private(set) var discoveredGroupCount: Int = 0
     @Published private(set) var upcomingBufferedGroupCount: Int = 0
     @Published private(set) var isExploringGroups: Bool = false
+    @Published var debugSimilarityTuning: SimilarityTuning = SimilarityPreset.standard.tuning
+    @Published var selectedPreset: SimilarityPreset = .standard {
+        didSet {
+            guard oldValue != selectedPreset else { return }
+            applyPreset(selectedPreset)
+        }
+    }
     @Published var groupingWindowMinutes: Int = 60 {
         didSet {
             let clamped = max(Self.minGroupingMinutes, min(groupingWindowMinutes, Self.maxGroupingMinutes))
@@ -142,14 +277,19 @@ final class PhotoLibraryViewModel: ObservableObject {
     static let minGroupingMinutes = 15
     static let maxGroupingMinutes = 240
     nonisolated static let dailyAdvanceLimit = 3
-    private static let perceptualHashThreshold = 12
-    private static let differenceHashThreshold = 18
     private static let advanceCountKey = "PhotoLibraryViewModel.dailyAdvanceCount"
     private static let advanceDateKey = "PhotoLibraryViewModel.dailyAdvanceDate"
     private static let targetUpcomingGroupCount = 10
     private static let bufferReplenishThreshold = 7
     private static let initialFetchBatchSize = 80
     private static let subsequentFetchBatchSize = 40
+    private static let profilePriority: [SceneProfile: Int] = [
+        .selfie: 0,
+        .people: 1,
+        .food: 2,
+        .landscape: 3,
+        .generic: 4
+    ]
 
     private let thumbnailCache: PhotoThumbnailCache
     private let fetchOptions: PHFetchOptions
@@ -201,8 +341,8 @@ final class PhotoLibraryViewModel: ObservableObject {
             return
         }
 
-        await fetchAdditionalThumbnailsIfNeeded(minUpcomingCount: Self.targetUpcomingGroupCount)
-        promoteQueuedGroupsIfNeeded(targetUpcoming: Self.targetUpcomingGroupCount)
+        await fetchAdditionalThumbnailsIfNeeded(minUpcomingCount: 1)
+        promoteQueuedGroupsIfNeeded(targetUpcoming: 1)
 
         if !groupedThumbnails.isEmpty {
             currentGroupIndex = min(currentGroupIndex, groupedThumbnails.count - 1)
@@ -212,6 +352,10 @@ final class PhotoLibraryViewModel: ObservableObject {
         }
 
         didFinishInitialLoad = true
+
+        if !groupedThumbnails.isEmpty {
+            requestBufferReplenishmentIfNeeded()
+        }
     }
 
     func reset() {
@@ -285,6 +429,24 @@ final class PhotoLibraryViewModel: ObservableObject {
             advancesPerformedToday = min(used, PhotoLibraryViewModel.dailyAdvanceLimit)
             remainingAdvanceQuota = max(0, PhotoLibraryViewModel.dailyAdvanceLimit - advancesPerformedToday)
         }
+    }
+
+    func updateSimilarityTuning<Value>(_ keyPath: WritableKeyPath<SimilarityTuning, Value>, to newValue: Value) {
+        debugSimilarityTuning[keyPath: keyPath] = newValue
+        applySimilarityTuningChanges()
+    }
+
+    func resetSimilarityTuning() {
+        if selectedPreset != .standard {
+            selectedPreset = .standard
+        } else {
+            applyPreset(.standard)
+        }
+    }
+
+    func reprocessAllGroupsFromStart() async {
+        guard !isLoading else { return }
+        await loadThumbnails(targetSize: thumbnailTargetSize)
     }
 
     @discardableResult
@@ -470,6 +632,27 @@ final class PhotoLibraryViewModel: ObservableObject {
         options.includeHiddenAssets = false
         options.includeAllBurstAssets = false
         return options
+    }
+
+    private func applySimilarityTuningChanges() {
+        guard !rawThumbnails.isEmpty else { return }
+        rebuildGroupsFromRaw(resetGroupIndex: false)
+        promoteQueuedGroupsIfNeeded(targetUpcoming: Self.targetUpcomingGroupCount)
+        if !groupedThumbnails.isEmpty {
+            currentGroupIndex = min(currentGroupIndex, groupedThumbnails.count - 1)
+            presentGroup(at: currentGroupIndex)
+        } else {
+            currentGroup = []
+        }
+        updateBufferedCounts()
+    }
+
+    private func applyPreset(_ preset: SimilarityPreset) {
+        let desired = preset.tuning
+        if debugSimilarityTuning != desired {
+            debugSimilarityTuning = desired
+        }
+        applySimilarityTuningChanges()
     }
 
     private func fetchAdditionalThumbnailsIfNeeded(minUpcomingCount: Int) async {
@@ -784,18 +967,140 @@ final class PhotoLibraryViewModel: ObservableObject {
             let timeDelta = abs(memberDate.timeIntervalSince(candidateDate))
             guard timeDelta <= window else { return false }
 
-            let perceptualDistance = PhotoLibraryViewModel.hammingDistance(
-                member.signature.perceptualHash,
-                candidate.signature.perceptualHash
-            )
-            guard perceptualDistance <= PhotoLibraryViewModel.perceptualHashThreshold else { return false }
+            let memberProfile = sceneProfile(for: member)
+            let candidateProfile = sceneProfile(for: candidate)
+            let dominantProfile = PhotoLibraryViewModel.dominantProfile(memberProfile, candidateProfile)
+            let thresholds = thresholds(for: dominantProfile)
 
-            let differenceDistance = PhotoLibraryViewModel.hammingDistance(
-                member.signature.differenceHash,
-                candidate.signature.differenceHash
+            return evaluateSimilarity(
+                lhs: member.signature,
+                rhs: candidate.signature,
+                thresholds: thresholds
             )
-            return differenceDistance <= PhotoLibraryViewModel.differenceHashThreshold
         }
+    }
+
+    private func sceneProfile(for thumbnail: AssetThumbnail) -> SceneProfile {
+        if thumbnail.signature.faceCount > 0 {
+            if thumbnail.asset.pixelWidth <= thumbnail.asset.pixelHeight && thumbnail.asset.pixelWidth < 2200 {
+                return .selfie
+            }
+            return .people
+        }
+
+        let lab = thumbnail.signature.labMoments
+        let meanA = lab.y
+        let meanB = lab.z
+
+        if meanA > 14 && meanB > 12 {
+            return .food
+        }
+
+        if meanB < -8 || thumbnail.signature.edgeDensity > 0.35 {
+            return .landscape
+        }
+
+        return .generic
+    }
+
+    private static func dominantProfile(_ lhs: SceneProfile, _ rhs: SceneProfile) -> SceneProfile {
+        if lhs == rhs { return lhs }
+        let lhsPriority = profilePriority[lhs] ?? 4
+        let rhsPriority = profilePriority[rhs] ?? 4
+        return lhsPriority <= rhsPriority ? lhs : rhs
+    }
+
+    private func thresholds(for profile: SceneProfile) -> SimilarityThresholds {
+        let base: SimilarityThresholds = {
+        switch profile {
+        case .selfie:
+            return SimilarityThresholds(
+                averageSoft: 8,
+                averageHard: 14,
+                differenceSoft: 12,
+                differenceHard: 20,
+                perceptualSoft: 16,
+                perceptualHard: 26,
+                labThreshold: 0.30,
+                edgeThreshold: 0.28,
+                edgeDensityTolerance: 0.20
+            )
+        case .people:
+            return SimilarityThresholds(
+                averageSoft: 10,
+                averageHard: 16,
+                differenceSoft: 14,
+                differenceHard: 22,
+                perceptualSoft: 18,
+                perceptualHard: 30,
+                labThreshold: 0.32,
+                edgeThreshold: 0.30,
+                edgeDensityTolerance: 0.24
+            )
+        case .food:
+            return SimilarityThresholds(
+                averageSoft: 12,
+                averageHard: 18,
+                differenceSoft: 16,
+                differenceHard: 26,
+                perceptualSoft: 22,
+                perceptualHard: 34,
+                labThreshold: 0.40,
+                edgeThreshold: 0.36,
+                edgeDensityTolerance: 0.28
+            )
+        case .landscape:
+            return SimilarityThresholds(
+                averageSoft: 12,
+                averageHard: 18,
+                differenceSoft: 16,
+                differenceHard: 26,
+                perceptualSoft: 24,
+                perceptualHard: 34,
+                labThreshold: 0.38,
+                edgeThreshold: 0.34,
+                edgeDensityTolerance: 0.30
+            )
+        case .generic:
+            return SimilarityThresholds(
+                averageSoft: 12,
+                averageHard: 16,
+                differenceSoft: 16,
+                differenceHard: 24,
+                perceptualSoft: 22,
+                perceptualHard: 30,
+                labThreshold: 0.36,
+                edgeThreshold: 0.32,
+                edgeDensityTolerance: 0.26
+            )
+        }
+    }()
+
+        return base.applying(debugSimilarityTuning)
+    }
+
+    private func evaluateSimilarity(lhs: PhotoSimilaritySignature,
+                                    rhs: PhotoSimilaritySignature,
+                                    thresholds: SimilarityThresholds) -> Bool {
+        let averageDistance = Self.hammingDistance(lhs.averageHash, rhs.averageHash)
+        if averageDistance > thresholds.averageHard { return false }
+
+        let differenceDistance = Self.hammingDistance(lhs.differenceHash, rhs.differenceHash)
+        if differenceDistance > thresholds.differenceHard { return false }
+
+        let perceptualDistance = Self.hammingDistance(lhs.perceptualHash, rhs.perceptualHash)
+        if perceptualDistance > thresholds.perceptualHard { return false }
+
+        let labDistance = PhotoSimilarityAnalyzer.histogramDistance(lhs: lhs.labHistogram, rhs: rhs.labHistogram)
+        if labDistance > thresholds.labThreshold { return false }
+
+        let edgeDistance = PhotoSimilarityAnalyzer.histogramDistance(lhs: lhs.edgeHistogram, rhs: rhs.edgeHistogram)
+        if edgeDistance > thresholds.edgeThreshold { return false }
+
+        let densityGap = abs(lhs.edgeDensity - rhs.edgeDensity)
+        if densityGap > thresholds.edgeDensityTolerance { return false }
+
+        return true
     }
 
     private func markBest(in group: inout [AssetThumbnail]) {
